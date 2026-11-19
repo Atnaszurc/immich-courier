@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,10 +61,11 @@ type Engine struct {
 	log      *slog.Logger
 	opt      Options
 
-	mu      sync.Mutex
-	pending map[string]*candidate
-	hashQ   chan job
-	watcher *fsnotify.Watcher
+	mu        sync.Mutex
+	pending   map[string]*candidate
+	hashQ     chan job
+	watcher   *fsnotify.Watcher
+	rescanReq chan struct{}
 }
 
 type candidate struct {
@@ -84,13 +86,14 @@ type job struct {
 func New(cfg *config.Config, apiKeys map[string]string, store *state.Store, log *slog.Logger, opt Options) (*Engine, error) {
 	opt.defaults()
 	e := &Engine{
-		folders:  cfg.Folders,
-		accounts: map[string]*account{},
-		store:    store,
-		log:      log,
-		opt:      opt,
-		pending:  map[string]*candidate{},
-		hashQ:    make(chan job, 64),
+		folders:   cfg.Folders,
+		accounts:  map[string]*account{},
+		store:     store,
+		log:       log,
+		opt:       opt,
+		pending:   map[string]*candidate{},
+		hashQ:     make(chan job, 64),
+		rescanReq: make(chan struct{}, 1),
 	}
 	for _, f := range cfg.Folders {
 		if _, ok := e.accounts[f.Account]; ok {
@@ -164,10 +167,71 @@ loop:
 			e.checkPending(ctx)
 		case <-rescan.C:
 			e.scanAll()
+		case <-e.rescanReq:
+			e.log.Info("rescan requested")
+			e.scanAll()
+			for _, a := range e.accounts {
+				a.poke()
+			}
 		}
 	}
 	wg.Wait()
 	return nil
+}
+
+// Rescan asks the running engine to rescan all folders and retry due uploads.
+func (e *Engine) Rescan() {
+	select {
+	case e.rescanReq <- struct{}{}:
+	default:
+	}
+}
+
+// SetPaused pauses or resumes uploads for all accounts. Watching, hashing
+// and queuing continue while paused.
+func (e *Engine) SetPaused(p bool) {
+	for _, a := range e.accounts {
+		a.paused.Store(p)
+		if !p {
+			a.poke()
+		}
+	}
+}
+
+// Folders returns the watched folders.
+func (e *Engine) Folders() []config.Folder { return e.folders }
+
+// AccountStatus is a snapshot of one account, for the tray and IPC.
+type AccountStatus struct {
+	Name       string    `json:"name"`
+	Server     string    `json:"server"`
+	Online     bool      `json:"online"`
+	Paused     bool      `json:"paused"`
+	AuthFailed bool      `json:"authFailed"`
+	Queued     int       `json:"queued"`
+	Uploading  string    `json:"uploading,omitempty"`
+	Uploaded   int       `json:"uploadedThisSession"`
+	LastUpload time.Time `json:"lastUpload,omitzero"`
+	LastError  string    `json:"lastError,omitempty"`
+}
+
+// Status returns a snapshot per account, sorted by name. Pending files that
+// are still settling or being hashed count as queued.
+func (e *Engine) Status() []AccountStatus {
+	pending := map[string]int{}
+	e.mu.Lock()
+	for _, c := range e.pending {
+		pending[c.folder.Account]++
+	}
+	e.mu.Unlock()
+	out := make([]AccountStatus, 0, len(e.accounts))
+	for _, a := range e.accounts {
+		s := a.status()
+		s.Queued += pending[a.cfg.Name]
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func (e *Engine) folderFor(path string) (config.Folder, bool) {

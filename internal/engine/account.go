@@ -35,6 +35,13 @@ type account struct {
 	online     atomic.Bool
 	authFailed atomic.Bool
 	failStreak atomic.Int32 // consecutive uploads that failed with network/5xx errors
+	paused     atomic.Bool
+
+	statMu     sync.Mutex
+	uploading  string
+	uploaded   int
+	lastUpload time.Time
+	lastError  string
 	wake       chan struct{} // something new is queued
 	recheck    chan struct{} // an upload hit a network error
 
@@ -171,7 +178,7 @@ func (a *account) uploader(ctx context.Context) {
 		case <-a.wake:
 		case <-t.C:
 		}
-		if a.online.Load() && !a.authFailed.Load() {
+		if a.online.Load() && !a.authFailed.Load() && !a.paused.Load() {
 			a.drain(ctx)
 		}
 	}
@@ -181,7 +188,7 @@ const batchSize = 50
 
 // drain uploads due files until the queue is empty or the server goes away.
 func (a *account) drain(ctx context.Context) {
-	for ctx.Err() == nil && a.online.Load() {
+	for ctx.Err() == nil && a.online.Load() && !a.paused.Load() {
 		due, err := a.store.Due(a.cfg.Name, time.Now(), batchSize)
 		if err != nil {
 			a.log.Error("state database read failed", "err", err)
@@ -204,7 +211,7 @@ func (a *account) drain(ctx context.Context) {
 			byID[r.ID] = r
 		}
 		for i, d := range due {
-			if ctx.Err() != nil || !a.online.Load() {
+			if ctx.Err() != nil || !a.online.Load() || a.paused.Load() {
 				return
 			}
 			r := byID[strconv.Itoa(i)]
@@ -238,7 +245,9 @@ func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
 		return true
 	}
 	start := time.Now()
+	a.setUploading(d.Path)
 	res, err := a.client.Upload(ctx, d.Path, d.SHA1, st.ModTime())
+	a.setUploading("")
 	if err != nil {
 		return a.handleErr(err, &d, d.Path)
 	}
@@ -250,6 +259,11 @@ func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
 		d.Status = state.Uploaded
 	}
 	a.put(d)
+	a.statMu.Lock() // after put, so status never shows a file as both uploaded and queued
+	a.uploaded++
+	a.lastUpload = time.Now()
+	a.lastError = ""
+	a.statMu.Unlock()
 	a.log.Info("uploaded", "path", d.Path, "status", res.Status, "bytes", d.Size, "took", time.Since(start).Round(time.Millisecond))
 	return true
 }
@@ -258,6 +272,12 @@ func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
 // 401 stops it until the user logs in again; other 4xx mark only this file
 // as failed and schedule a retry. It returns whether draining can continue.
 func (a *account) handleErr(err error, d *state.Entry, path string) bool {
+	if errors.Is(err, context.Canceled) {
+		return false // shutting down or reloading; the file stays queued
+	}
+	a.statMu.Lock()
+	a.lastError = err.Error()
+	a.statMu.Unlock()
 	var apiErr *immich.APIError
 	switch {
 	case !errors.As(err, &apiErr):
@@ -292,5 +312,23 @@ func retryDelay(attempts int) time.Duration {
 func (a *account) put(d state.Entry) {
 	if err := a.store.Put(d.Path, d.Record); err != nil {
 		a.log.Error("state database write failed", "err", err)
+	}
+}
+
+func (a *account) setUploading(path string) {
+	a.statMu.Lock()
+	a.uploading = path
+	a.statMu.Unlock()
+}
+
+func (a *account) status() AccountStatus {
+	q, _ := a.store.QueueLen(a.cfg.Name)
+	a.statMu.Lock()
+	defer a.statMu.Unlock()
+	return AccountStatus{
+		Name: a.cfg.Name, Server: a.cfg.Server,
+		Online: a.online.Load(), Paused: a.paused.Load(), AuthFailed: a.authFailed.Load(),
+		Queued: q, Uploading: a.uploading, Uploaded: a.uploaded,
+		LastUpload: a.lastUpload, LastError: a.lastError,
 	}
 }

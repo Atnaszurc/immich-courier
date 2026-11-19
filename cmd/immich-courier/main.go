@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -17,12 +16,12 @@ import (
 
 	"immich-courier/internal/auth"
 	"immich-courier/internal/config"
-	"immich-courier/internal/engine"
+	"immich-courier/internal/daemon"
 	"immich-courier/internal/immich"
 	"immich-courier/internal/state"
 )
 
-const keyringService = "immich-courier"
+var version = "dev" // set with -ldflags "-X main.version=..."
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,28 +31,33 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	var err error
+	cmds := map[string]func(context.Context, []string) error{
+		"run":           cmdRun,
+		"status":        cmdStatus,
+		"pause":         ipcCmd("pause", (*daemon.Client).Pause, "Uploads paused. Files are still watched and queued."),
+		"resume":        ipcCmd("resume", (*daemon.Client).Resume, "Uploads resumed."),
+		"rescan":        ipcCmd("rescan", (*daemon.Client).Rescan, "Rescanning folders."),
+		"stop":          ipcCmd("stop", (*daemon.Client).Quit, "Stopped."),
+		"login":         cmdLogin,
+		"logout":        cmdLogout,
+		"add-folder":    cmdAddFolder,
+		"remove-folder": cmdRemoveFolder,
+		"list":          cmdList,
+	}
 	switch os.Args[1] {
-	case "run":
-		err = cmdRun(ctx, os.Args[2:])
-	case "login":
-		err = cmdLogin(ctx, os.Args[2:])
-	case "logout":
-		err = cmdLogout(os.Args[2:])
-	case "add-folder":
-		err = cmdAddFolder(os.Args[2:])
-	case "remove-folder":
-		err = cmdRemoveFolder(os.Args[2:])
-	case "list":
-		err = cmdList(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
-	default:
+	case "-v", "--version", "version":
+		fmt.Println("immich-courier", version)
+		return
+	}
+	f, ok := cmds[os.Args[1]]
+	if !ok {
 		usage()
 		os.Exit(2)
 	}
-	if err != nil {
+	if err := f(ctx, os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -62,13 +66,19 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `immich-courier: watch folders and upload new photos/videos to Immich
 
-Commands:
+Setup:
   login          --account NAME --server URL [--method auto|oidc|password|apikey]
   logout         --account NAME
   add-folder     --path DIR --account NAME
   remove-folder  --path DIR
-  list           show accounts, folders and upload counts
-  run            watch folders and upload (runs until stopped)
+  list           show accounts and folders
+
+Running:
+  run            watch and upload in the foreground (for servers; desktops use immich-courier-tray)
+  status         show what a running instance is doing
+  pause|resume   pause or resume uploads (watching and queuing continue)
+  rescan         rescan folders now and retry waiting uploads
+  stop           stop a running instance
 
 Every command takes --config FILE (default: `+defaultConfigPath()+`).
 `)
@@ -86,62 +96,108 @@ func configFlag(fs *flag.FlagSet) *string {
 	return fs.String("config", defaultConfigPath(), "config file")
 }
 
-func statePath(cfgPath string) string {
-	return filepath.Join(filepath.Dir(cfgPath), "state.db")
-}
-
 func cmdRun(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfgPath := configFlag(fs)
 	verbose := fs.Bool("v", false, "debug logging")
 	fs.Parse(args)
 
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		return err
-	}
 	level := slog.LevelInfo
 	if *verbose {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-
-	keys := map[string]string{}
-	for _, f := range cfg.Folders {
-		if _, done := keys[f.Account]; done {
-			continue
-		}
-		k, err := keyring.Get(keyringService, f.Account)
-		if err != nil {
-			return fmt.Errorf("no API key for account %q in the OS keychain (%v); run login first", f.Account, err)
-		}
-		if strings.IndexFunc(k, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
-			return fmt.Errorf("the API key stored for account %q is malformed; run login again", f.Account)
-		}
-		keys[f.Account] = k
-	}
-	if err := os.MkdirAll(filepath.Dir(*cfgPath), 0o700); err != nil {
-		return err
-	}
-	store, err := state.Open(statePath(*cfgPath))
+	d, err := daemon.Open(*cfgPath, version, log)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	e, err := engine.New(cfg, keys, store, log, engine.Options{
-		Settle: cfg.Settings.Settle(),
-		Rescan: cfg.Settings.Rescan(),
-	})
-	if err != nil {
-		return err
-	}
-	log.Info("immich-courier started", "config", *cfgPath)
-	err = e.Run(ctx)
+	log.Info("immich-courier started", "version", version, "config", *cfgPath)
+	err = d.Run(ctx)
 	log.Info("immich-courier stopped")
 	return err
 }
 
-func cmdAddFolder(args []string) error {
+// ipcCmd builds a command that sends one request to the running instance.
+func ipcCmd(name string, call func(*daemon.Client, context.Context) error, done string) func(context.Context, []string) error {
+	return func(ctx context.Context, args []string) error {
+		fs := flag.NewFlagSet(name, flag.ExitOnError)
+		cfgPath := configFlag(fs)
+		fs.Parse(args)
+		c, err := daemon.Dial(*cfgPath)
+		if err != nil {
+			return err
+		}
+		if err := call(c, ctx); err != nil {
+			return err
+		}
+		fmt.Println(done)
+		return nil
+	}
+}
+
+// notifyReload tells a running instance to pick up config changes.
+func notifyReload(ctx context.Context, cfgPath string) {
+	c, err := daemon.Dial(cfgPath)
+	if err != nil {
+		fmt.Println("(immich-courier isn't running; the change applies when it starts)")
+		return
+	}
+	if err := c.Reload(ctx); err != nil {
+		fmt.Println("The running instance reloaded, but reports:", err)
+		return
+	}
+	fmt.Println("The running instance picked up the change.")
+}
+
+func cmdStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	fs.Parse(args)
+	c, err := daemon.Dial(*cfgPath)
+	if err != nil {
+		return err
+	}
+	s, err := c.Status(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("immich-courier %s, running since %s\n", s.Version, s.Started.Local().Format("2006-01-02 15:04"))
+	if s.Paused {
+		fmt.Println("Uploads are PAUSED (resume with: immich-courier resume)")
+	}
+	if s.Problem != "" {
+		fmt.Println("Not uploading:", s.Problem)
+	}
+	for _, a := range s.Accounts {
+		conn := "online"
+		switch {
+		case a.AuthFailed:
+			conn = "API KEY REJECTED, log in again"
+		case !a.Online:
+			conn = "server unreachable, waiting"
+		}
+		fmt.Printf("\nAccount %q  %s  [%s]\n", a.Name, a.Server, conn)
+		fmt.Printf("  waiting: %d   uploaded since start: %d", a.Queued, a.Uploaded)
+		if !a.LastUpload.IsZero() {
+			fmt.Printf("   last upload: %s", a.LastUpload.Local().Format("15:04:05"))
+		}
+		fmt.Println()
+		if a.Uploading != "" {
+			fmt.Println("  uploading:", a.Uploading)
+		}
+		if a.LastError != "" {
+			fmt.Println("  last error:", a.LastError)
+		}
+		for _, f := range s.Folders {
+			if f.Account == a.Name {
+				fmt.Println("  watching", f.Path)
+			}
+		}
+	}
+	return nil
+}
+
+func cmdAddFolder(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("add-folder", flag.ExitOnError)
 	cfgPath := configFlag(fs)
 	path := fs.String("path", "", "folder to watch (required)")
@@ -160,11 +216,12 @@ func cmdAddFolder(args []string) error {
 	if err := cfg.Save(*cfgPath); err != nil {
 		return err
 	}
-	fmt.Printf("Watching %s for account %q (takes effect when immich-courier run is (re)started)\n", cfg.Folders[len(cfg.Folders)-1].Path, *account)
+	fmt.Printf("Watching %s for account %q.\n", cfg.Folders[len(cfg.Folders)-1].Path, *account)
+	notifyReload(ctx, *cfgPath)
 	return nil
 }
 
-func cmdRemoveFolder(args []string) error {
+func cmdRemoveFolder(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("remove-folder", flag.ExitOnError)
 	cfgPath := configFlag(fs)
 	path := fs.String("path", "", "watched folder to remove (required)")
@@ -184,10 +241,11 @@ func cmdRemoveFolder(args []string) error {
 		return err
 	}
 	fmt.Println("Removed. Files already in Immich are not affected.")
+	notifyReload(ctx, *cfgPath)
 	return nil
 }
 
-func cmdList(args []string) error {
+func cmdList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	cfgPath := configFlag(fs)
 	fs.Parse(args)
@@ -200,22 +258,25 @@ func cmdList(args []string) error {
 		fmt.Println("No accounts yet. Start with: immich-courier login --account NAME --server URL")
 		return nil
 	}
+	// Totals come from the state DB, which only one process can open; if an
+	// instance is running, use `status` for live numbers instead.
 	var counts map[string]map[state.Status]int
-	if st, err := state.Open(statePath(*cfgPath)); err == nil {
+	if c, err := daemon.Dial(*cfgPath); err == nil {
+		if _, err := c.Status(ctx); err == nil {
+			fmt.Println("(immich-courier is running; see `immich-courier status` for live numbers)")
+		}
+	} else if st, err := state.Open(daemon.StatePath(*cfgPath)); err == nil {
 		counts, _ = st.Counts()
 		st.Close()
-	} else {
-		fmt.Println("(upload counts unavailable while immich-courier run is active)")
 	}
 	for _, a := range cfg.Accounts {
-		_, keyErr := keyring.Get(keyringService, a.Name)
 		key := "API key in keychain"
-		if keyErr != nil {
+		if _, err := keyring.Get(daemon.KeyringService, a.Name); err != nil {
 			key = "NO API KEY (run login)"
 		}
 		fmt.Printf("\nAccount %q  %s  [%s]\n", a.Name, a.Server, key)
 		if c := counts[a.Name]; c != nil {
-			fmt.Printf("  uploaded %d, already in Immich %d, queued %d, failed %d, rejected %d\n",
+			fmt.Printf("  uploaded %d, already in Immich %d, waiting %d, failed %d, rejected %d\n",
 				c[state.Uploaded], c[state.Duplicate], c[state.Queued], c[state.Failed], c[state.Rejected])
 		}
 		for _, f := range cfg.Folders {
@@ -326,10 +387,10 @@ func cmdLogin(ctx context.Context, args []string) error {
 	} else {
 		fmt.Printf("API key works: uploads will go to %s <%s>\n", u.Name, u.Email)
 	}
-	if err := keyring.Set(keyringService, *account, secret); err != nil {
+	if err := keyring.Set(daemon.KeyringService, *account, secret); err != nil {
 		return fmt.Errorf("store key in OS keychain: %w", err)
 	}
-	fmt.Printf("Stored in the OS keychain as %s/%s\n", keyringService, *account)
+	fmt.Printf("Stored in the OS keychain as %s/%s\n", daemon.KeyringService, *account)
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -339,18 +400,19 @@ func cmdLogin(ctx context.Context, args []string) error {
 	if err := cfg.Save(*cfgPath); err != nil {
 		return err
 	}
-	fmt.Printf("Account %q saved to %s. Next: immich-courier add-folder --path DIR --account %s\n", *account, *cfgPath, *account)
+	fmt.Printf("Account %q saved to %s.\n", *account, *cfgPath)
+	notifyReload(ctx, *cfgPath)
 	return nil
 }
 
-func cmdLogout(args []string) error {
+func cmdLogout(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("logout", flag.ExitOnError)
 	account := fs.String("account", "", "account profile name (required)")
 	fs.Parse(args)
 	if *account == "" {
 		return errors.New("--account is required")
 	}
-	if err := keyring.Delete(keyringService, *account); err != nil {
+	if err := keyring.Delete(daemon.KeyringService, *account); err != nil {
 		return err
 	}
 	fmt.Println("Removed the key from the OS keychain. The API key itself still exists in Immich; delete it under Account settings → API keys if you no longer need it.")

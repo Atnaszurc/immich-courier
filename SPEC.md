@@ -152,8 +152,27 @@ vendoring Immich's generated SDK or copying server code.
 - Measured on Windows: 8.4 MB binary (stripped); ~19 MB working set after scanning, hashing and
   queuing 2,000 files, steady while idle.
 
+### IPC and tray (2026-11-19)
+
+- Two binaries share `internal/daemon`: `immich-courier` (CLI; `run` = headless daemon for
+  servers) and `immich-courier-tray` (daemon + tray; `-H=windowsgui` on Windows, logs to
+  `immich-courier.log` next to the config, rotated at 5 MB).
+- IPC: HTTP over a Unix domain socket (`courier.sock` next to the config; Windows 10 1803+
+  supports AF_UNIX). If that path exceeds ~100 bytes (sun_path limit), a hashed name in a private
+  per-user dir is used (`$XDG_RUNTIME_DIR` on Linux, else `<tmp>/immich-courier-<user>`, must be 0700).
+  Endpoints: `GET /v1/status`, `POST /v1/{pause,resume,rescan,reload,quit}`.
+- One instance per config: a live socket means "already running"; the bbolt lock backs that up.
+- `login`, `add-folder`, `remove-folder` tell a running instance to reload; queued files survive.
+- Pause is persisted in the state DB. Watching and hashing continue while paused.
+- Tray: fyne.io/systray (pure Go on Windows/Linux via DBus StatusNotifierItem; **CGO on macOS**,
+  so mac builds need a mac runner). Icons are drawn in code (no Immich artwork):
+  green idle, blue busy, grey paused, dark grey + slash offline, amber needs attention.
+- Start at login, per user, no admin: HKCU Run key / LaunchAgent plist / XDG autostart .desktop.
+- Measured on Windows: tray process ~26 MB working set with 2,000 queued files.
+
 ## Open decisions
 
-- Settings UI toolkit.
-- IPC mechanism between daemon, CLI and settings UI (named pipe / unix socket).
-- Running at login: per-OS autostart (Startup folder / LaunchAgent / systemd user unit).
+- Settings window (adding accounts and folders without the CLI): toolkit and whether it's a
+  separate process launched from the tray.
+- Linux headless: ship a systemd user unit for `immich-courier run`.
+- Release builds: CI for Windows/Linux (pure Go) + macOS runner (CGO), signing/notarization.

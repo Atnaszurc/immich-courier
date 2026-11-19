@@ -147,6 +147,20 @@ func (s *Store) Due(account string, now time.Time, limit int) ([]Entry, error) {
 	return out, err
 }
 
+// QueueLen returns how many files are waiting to upload for an account.
+func (s *Store) QueueLen(account string) (int, error) {
+	n := 0
+	prefix := []byte(account + "\x00")
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bQueue).Cursor()
+		for k, _ := c.Seek(prefix); k != nil && len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix); k, _ = c.Next() {
+			n++
+		}
+		return nil
+	})
+	return n, err
+}
+
 // Counts returns the number of records per account and status.
 func (s *Store) Counts() (map[string]map[Status]int, error) {
 	out := map[string]map[Status]int{}
