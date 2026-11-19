@@ -53,7 +53,28 @@ Status: design phase. Intended to be released as open source.
    `/api/oauth/callback` → Immich session → app creates an API key scoped to
    upload-only permissions via `POST /api/api-keys` → stores the key in the keychain
    and logs out the session.
-   - Open question: does Immich accept a non-mobile redirect URI? Verify first.
+
+### OIDC findings (spike, 2026-11-19, Immich v3.3.5)
+
+- Immich does **not** restrict `redirectUri`: `POST /api/oauth/authorize` with
+  `http://127.0.0.1:<port>/callback` returns a provider URL with that redirect, PKCE (S256)
+  and state. No auth needed for this call.
+- Immich keeps state + PKCE verifier in cookies (`immich_oauth_state`,
+  `immich_oauth_code_verifier`) set on the authorize response. The app must keep a cookie
+  jar between authorize and `POST /api/oauth/callback` (without them: "OAuth state is missing").
+- The **identity provider** is the gate: a redirect URI that isn't registered is rejected
+  (tested: Authentik with strict matching → 400 "mismatching redirection URI").
+  So OIDC login only works if the Immich admin registers the app's loopback URI with their
+  provider. That is a one-time provider setting, not app code — the app stays provider-agnostic.
+- Design consequence:
+  - Default to a **fixed loopback port** (configurable), e.g. `http://127.0.0.1:47823/callback`,
+    so providers with exact-match redirect URIs work. Document "add this redirect URI to your
+    Immich OAuth client" in the README.
+  - The **zero-config path** stays the API key. The app can open the Immich web UI at the
+    API key page so the user only copies and pastes one value.
+  - If OAuth isn't enabled (`/api/server/features` → `oauth: false`), only show the API key option.
+- Still to verify end to end: callback → session token, `POST /api/api-keys` with
+  upload-only permissions, then logout.
 
 Secrets never go in the config file; config references a keychain entry.
 
@@ -99,6 +120,12 @@ account = "personal"
 
 CLI (draft): `immich-courier daemon | status | add-folder | remove-folder | login | logout | settings`.
 
+## License
+
+MIT. The app talks to Immich over its HTTP API and doesn't include Immich code, so Immich's
+AGPL-3.0 doesn't apply. Keep it that way: write our own small API client rather than
+vendoring Immich's generated SDK or copying server code.
+
 ## Later / maybe
 
 - Per-folder "add to album".
@@ -108,6 +135,5 @@ CLI (draft): `immich-courier daemon | status | add-folder | remove-folder | logi
 
 ## Open decisions
 
-- License (MIT / Apache-2.0 / AGPL-3.0 to match Immich).
 - Settings UI toolkit.
 - State DB: SQLite (modernc, pure Go) vs bbolt.
