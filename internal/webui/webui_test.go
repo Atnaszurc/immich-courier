@@ -228,3 +228,38 @@ func TestSetupFlow(t *testing.T) {
 		t.Fatalf("account or folder left behind: %v", out)
 	}
 }
+
+func TestTimingSettings(t *testing.T) {
+	_, c, loginURL := setup(t)
+	if resp, err := c.hc.Get(loginURL); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+	settings := func() map[string]any {
+		_, out := c.do("GET", "/api/state", nil, false)
+		return out["settings"].(map[string]any)
+	}
+	// Defaults are reported as real values, not 0.
+	if s := settings(); s["settleSeconds"] != float64(5) || s["rescanMinutes"] != float64(15) {
+		t.Fatalf("defaults: %v", s)
+	}
+	if resp, out := c.do("POST", "/api/settings", map[string]int{"settleSeconds": 30, "rescanMinutes": 60}, true); resp.StatusCode != 200 {
+		t.Fatalf("save: %v", out)
+	}
+	if s := settings(); s["settleSeconds"] != float64(30) || s["rescanMinutes"] != float64(60) {
+		t.Fatalf("after save: %v", s)
+	}
+	for _, bad := range []map[string]int{
+		{"settleSeconds": 0, "rescanMinutes": 15},
+		{"settleSeconds": 99999, "rescanMinutes": 15},
+		{"settleSeconds": 30, "rescanMinutes": -1},
+	} {
+		if resp, _ := c.do("POST", "/api/settings", bad, true); resp.StatusCode != 400 {
+			t.Fatalf("accepted %v", bad)
+		}
+	}
+	if s := settings(); s["settleSeconds"] != float64(30) {
+		t.Fatalf("a rejected save changed the settings: %v", s)
+	}
+}

@@ -23,6 +23,7 @@ import (
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/state", s.apiState)
 	mux.HandleFunc("POST /api/pause", s.apiPause)
+	mux.HandleFunc("POST /api/settings", s.apiSettings)
 	mux.HandleFunc("POST /api/rescan", func(w http.ResponseWriter, r *http.Request) {
 		s.d.Rescan()
 		writeJSON(w, 200, struct{}{})
@@ -58,6 +59,7 @@ type stateView struct {
 	Folders  []config.Folder `json:"folders"`
 	Config   string          `json:"config"`
 	Home     string          `json:"home"`
+	Settings config.Settings `json:"settings"` // effective values (defaults filled in)
 }
 
 func (s *Server) apiState(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +73,7 @@ func (s *Server) apiState(w http.ResponseWriter, r *http.Request) {
 	for _, a := range st.Accounts {
 		live[a.Name] = a
 	}
-	v := stateView{Version: st.Version, Paused: st.Paused, Problem: st.Problem, Config: s.d.CfgPath, Folders: cfg.Folders, Accounts: []accountView{}}
+	v := stateView{Version: st.Version, Paused: st.Paused, Problem: st.Problem, Config: s.d.CfgPath, Folders: cfg.Folders, Accounts: []accountView{}, Settings: cfg.Settings.Effective()}
 	if v.Folders == nil {
 		v.Folders = []config.Folder{}
 	}
@@ -102,6 +104,32 @@ func (s *Server) apiPause(w http.ResponseWriter, r *http.Request) {
 	}
 	s.d.SetPaused(in.Paused)
 	writeJSON(w, 200, struct{}{})
+}
+
+// apiSettings saves the upload delay and rescan interval. The reload
+// restarts the engine, so files still waiting start their delay over.
+func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
+	var in config.Settings
+	if err := readJSON(r, &in); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	if in.SettleSeconds < 1 || in.RescanMinutes < 1 {
+		fail(w, 400, errors.New("choose a value for both settings"))
+		return
+	}
+	cfg, err := config.Load(s.d.CfgPath)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	cfg.Settings = in
+	if err := cfg.Save(s.d.CfgPath); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	s.reload()
+	writeJSON(w, 200, cfg.Settings.Effective())
 }
 
 // --- accounts ---

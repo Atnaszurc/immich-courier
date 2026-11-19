@@ -15,10 +15,35 @@ import (
 )
 
 type Settings struct {
-	// Seconds a file's size and mtime must stay unchanged before it's queued.
-	SettleSeconds int `toml:"settle_seconds,omitempty"`
+	// Upload delay: seconds a file must stay unchanged before it's queued.
+	// It covers files still being copied, and gives the user time to delete
+	// or replace a file dropped in by mistake (it is then never uploaded).
+	SettleSeconds int `toml:"settle_seconds,omitempty" json:"settleSeconds"`
 	// Minutes between full rescans of watched folders (safety net for missed events).
-	RescanMinutes int `toml:"rescan_minutes,omitempty"`
+	RescanMinutes int `toml:"rescan_minutes,omitempty" json:"rescanMinutes"`
+}
+
+// Defaults and allowed ranges; 0 in the config file means the default.
+const (
+	DefaultSettleSeconds = 5
+	MaxSettleSeconds     = 3600
+	DefaultRescanMinutes = 15
+	MaxRescanMinutes     = 1440
+)
+
+// Effective returns the settings with defaults filled in.
+func (s Settings) Effective() Settings {
+	return Settings{SettleSeconds: int(s.Settle() / time.Second), RescanMinutes: int(s.Rescan() / time.Minute)}
+}
+
+func (s Settings) validate() error {
+	if s.SettleSeconds < 0 || s.SettleSeconds > MaxSettleSeconds {
+		return fmt.Errorf("settle_seconds must be between 1 and %d (or 0 for the default)", MaxSettleSeconds)
+	}
+	if s.RescanMinutes < 0 || s.RescanMinutes > MaxRescanMinutes {
+		return fmt.Errorf("rescan_minutes must be between 1 and %d (or 0 for the default)", MaxRescanMinutes)
+	}
+	return nil
 }
 
 type Account struct {
@@ -39,14 +64,14 @@ type Config struct {
 
 func (s Settings) Settle() time.Duration {
 	if s.SettleSeconds <= 0 {
-		return 5 * time.Second
+		return DefaultSettleSeconds * time.Second
 	}
 	return time.Duration(s.SettleSeconds) * time.Second
 }
 
 func (s Settings) Rescan() time.Duration {
 	if s.RescanMinutes <= 0 {
-		return 15 * time.Minute
+		return DefaultRescanMinutes * time.Minute
 	}
 	return time.Duration(s.RescanMinutes) * time.Minute
 }
@@ -171,6 +196,9 @@ func (c *Config) RemoveFolder(path string) (bool, error) {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Settings.validate(); err != nil {
+		return err
+	}
 	names := map[string]bool{}
 	for _, a := range c.Accounts {
 		if a.Name == "" || a.Server == "" {

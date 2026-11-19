@@ -149,6 +149,7 @@ function render() {
 
   renderAccounts();
   renderFolders();
+  renderSettings();
   $("footer").textContent = `immich-courier ${state.version} · config: ${state.config}`;
 }
 
@@ -216,6 +217,40 @@ function renderFolders() {
     );
   }
 }
+
+// Selects show the saved value; a value set in config.toml that isn't one of
+// the presets gets its own option so it isn't silently changed.
+function setSelect(sel, value, label) {
+  const v = String(value);
+  if (document.activeElement === sel) return; // don't fight the user
+  if (![...sel.options].some((o) => o.value === v)) {
+    sel.append(h("option", { value: v }, label(value) + " (custom)"));
+  }
+  sel.value = v;
+}
+
+function renderSettings() {
+  const s = state.settings;
+  setSelect($("sel-delay"), s.settleSeconds, (n) => (n % 60 === 0 ? `${n / 60} min` : `${n} seconds`));
+  setSelect($("sel-rescan"), s.rescanMinutes, (n) => (n % 60 === 0 ? `${n / 60} h` : `${n} minutes`));
+}
+
+async function saveSettings() {
+  try {
+    const saved = await api("POST", "/api/settings", {
+      settleSeconds: Number($("sel-delay").value),
+      rescanMinutes: Number($("sel-rescan").value),
+    });
+    state.settings = saved;
+    toast("Saved");
+  } catch (e) {
+    toast(e.message);
+    refresh();
+  }
+}
+
+$("sel-delay").addEventListener("change", saveSettings);
+$("sel-rescan").addEventListener("change", saveSettings);
 
 // ---- actions ------------------------------------------------------------
 

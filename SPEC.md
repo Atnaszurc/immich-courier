@@ -192,6 +192,11 @@ vendoring Immich's generated SDK or copying server code.
   (browsers can't hand real paths to a page), create folder, pause/resume, check now, live status.
 - Headless servers: `immich-courier settings --print` gives the URL to open through an SSH tunnel.
 - All account logic is shared with the CLI (`internal/accounts`).
+- "Upload timing" section: **Wait before uploading** (`settle_seconds`, presets 5 s–15 min,
+  default 5 s) doubles as an undo window like the Immich mobile app's upload delay: a file deleted or
+  moved before the delay is over is never uploaded. **Check folders for missed files every**
+  (`rescan_minutes`, 5–60 min, default 15). Saved immediately; config rejects out-of-range values
+  (settle 1–3600 s, rescan 1–1440 min, 0 = default); non-preset values from the file show as "custom".
 
 ## Open decisions
 

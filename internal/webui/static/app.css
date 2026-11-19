@@ -115,6 +115,10 @@ h3 { margin: 0 0 14px; font-size: 18px; }
 .card-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 
 .list { display: flex; flex-direction: column; gap: 8px; }
+.card.settings { margin-top: 12px; gap: 14px; }
+.setting label { margin-top: 0; }
+.setting select { max-width: 340px; }
+.setting .hint { margin-bottom: 0; }
 .row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
 .row-main { flex: 1; min-width: 0; }
 .row-path { overflow-wrap: anywhere; }

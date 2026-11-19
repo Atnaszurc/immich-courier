@@ -213,6 +213,32 @@ func TestUploadDedupeAndOffline(t *testing.T) {
 	}
 }
 
+// The upload delay (Settle) gives the user time to take back a file: one
+// deleted before the delay is over is never uploaded.
+func TestFileDeletedDuringDelayIsNotUploaded(t *testing.T) {
+	fake := &fakeImmich{assets: map[string]string{}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+	dir := t.TempDir()
+	h := start(t, fake, srv.URL, dir, filepath.Join(t.TempDir(), "state.db"))
+	defer h.stop()
+
+	oops := filepath.Join(dir, "oops.jpg")
+	os.WriteFile(oops, []byte("wrong photo"), 0o644)
+	time.Sleep(100 * time.Millisecond) // well inside the 300 ms delay
+	os.Remove(oops)
+
+	// A file that stays is still uploaded, which proves the engine was running.
+	os.WriteFile(filepath.Join(dir, "keep.jpg"), []byte("right photo"), 0o644)
+	waitFor(t, "keep.jpg uploaded", func() bool { return fake.has("keep.jpg") })
+	if fake.has("oops.jpg") {
+		t.Fatal("deleted file was uploaded")
+	}
+	if _, ok, _ := h.store.Get(oops); ok {
+		t.Fatal("deleted file was recorded in the queue")
+	}
+}
+
 func TestFileStillBeingWritten(t *testing.T) {
 	fake := &fakeImmich{assets: map[string]string{}}
 	srv := httptest.NewServer(fake.handler())

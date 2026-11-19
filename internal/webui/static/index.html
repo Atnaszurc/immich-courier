@@ -41,6 +41,36 @@
     <p class="hint">Photos and videos added to these folders are uploaded to the chosen account. Deleting a file here never deletes it in Immich.</p>
     <div id="folders" class="list"></div>
   </section>
+
+  <section aria-labelledby="h-timing">
+    <div class="section-head">
+      <h2 id="h-timing">Upload timing</h2>
+    </div>
+    <div class="card settings">
+      <div class="setting">
+        <label for="sel-delay">Wait before uploading</label>
+        <select id="sel-delay">
+          <option value="5">5 seconds (just until copying finishes)</option>
+          <option value="30">30 seconds</option>
+          <option value="60">1 minute</option>
+          <option value="120">2 minutes</option>
+          <option value="300">5 minutes</option>
+          <option value="900">15 minutes</option>
+        </select>
+        <p class="hint">A new file is uploaded once it has been left unchanged this long. If you delete or move it before then, it isn't uploaded, so a longer wait gives you time to undo a file put in by mistake.</p>
+      </div>
+      <div class="setting">
+        <label for="sel-rescan">Check folders for missed files every</label>
+        <select id="sel-rescan">
+          <option value="5">5 minutes</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+        </select>
+        <p class="hint">New files are normally noticed right away. This extra check catches anything missed, for example on network drives.</p>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer id="footer"></footer>
