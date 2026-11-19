@@ -1,5 +1,3 @@
-// immich-courier-tray runs the uploader with a tray icon. On Windows it is
-// built as a GUI program (-ldflags -H=windowsgui) so no console window opens.
 package main
 
 import (
@@ -10,28 +8,28 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 
 	"fyne.io/systray"
 
-	"immich-courier/internal/config"
 	"immich-courier/internal/daemon"
 	"immich-courier/internal/tray"
 )
 
-var version = "dev"
-
 const maxLogSize = 5 << 20
 
-func main() {
-	defPath, _ := config.DefaultPath()
-	cfgPath := flag.String("config", defPath, "config file")
-	flag.Parse()
+// cmdTray runs the uploader with a tray icon. It's what runs when the
+// program is started without arguments (double-click, start at login).
+func cmdTray(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("tray", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	fs.Parse(args)
+
+	hideOwnConsole()
 
 	if err := os.MkdirAll(filepath.Dir(*cfgPath), 0o700); err != nil {
 		tray.ShowError(err.Error())
-		os.Exit(1)
+		return err
 	}
 	logPath := daemon.LogPath(*cfgPath)
 	logFile := openLog(logPath)
@@ -40,17 +38,17 @@ func main() {
 
 	d, err := daemon.Open(*cfgPath, version, log)
 	if errors.Is(err, daemon.ErrAlreadyRunning) {
-		return // the tray for this config is already running
+		fmt.Fprintln(os.Stderr, "immich-courier is already running.")
+		return nil
 	}
 	if err != nil {
 		log.Error("can't start", "err", err)
 		tray.ShowError("immich-courier can't start:\n\n" + err.Error())
-		os.Exit(1)
+		return err
 	}
-	log.Info("immich-courier tray started", "version", version, "config", *cfgPath)
+	log.Info("immich-courier started with tray", "version", version, "config", *cfgPath)
+	fmt.Fprintln(os.Stderr, "immich-courier is running in the system tray. Log:", logPath)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
@@ -62,14 +60,16 @@ func main() {
 		systray.Quit()
 	}()
 
-	var launchArgs []string
-	if *cfgPath != defPath {
-		launchArgs = []string{"--config", *cfgPath}
+	launchArgs := []string{"tray"}
+	if *cfgPath != defaultConfigPath() {
+		launchArgs = append(launchArgs, "--config", *cfgPath)
 	}
 	tray.Run(ctx, d, tray.Options{ConfigPath: *cfgPath, LogPath: logPath, LaunchArgs: launchArgs})
-	// Tray closed (Quit, or the session is ending): stop the daemon and wait.
+	// Tray closed (Quit, or the session is ending): stop the daemon and wait,
+	// so the state DB and socket are closed cleanly.
 	d.Quit()
-	<-runDone // let the daemon finish, so the state DB and socket are closed cleanly
+	<-runDone
+	return nil
 }
 
 // openLog appends to the log file, starting over (keeping one old copy)
@@ -89,3 +89,15 @@ func openLog(p string) io.WriteCloser {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
+
+// guiAvailable reports whether a tray can be shown, so that running the
+// program without arguments on a headless server prints help instead.
+func guiAvailable() bool {
+	switch {
+	case isWindows(), isDarwin():
+		return true
+	default:
+		return os.Getenv("DBUS_SESSION_BUS_ADDRESS") != "" &&
+			(os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "")
+	}
+}

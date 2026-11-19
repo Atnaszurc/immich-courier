@@ -154,9 +154,15 @@ vendoring Immich's generated SDK or copying server code.
 
 ### IPC and tray (2026-11-19)
 
-- Two binaries share `internal/daemon`: `immich-courier` (CLI; `run` = headless daemon for
-  servers) and `immich-courier-tray` (daemon + tray; `-H=windowsgui` on Windows, logs to
-  `immich-courier.log` next to the config, rotated at 5 MB).
+- **One binary.** No arguments (or `tray`) runs the daemon with a tray icon when a desktop session
+  is available; otherwise it prints help. `run` is the headless daemon for servers. All other
+  commands are CLI. The tray logs to `immich-courier.log` next to the config (rotated at 5 MB).
+- Windows: built as a console app so the CLI behaves normally in terminals. An embedded manifest
+  sets `consoleAllocationPolicy=detached` (Windows 11 24H2 / build 26100+), so starting it from
+  Explorer or at login opens no console window; verified on build 26300. Older Windows ignores the
+  policy: the tray then frees the console it was given (a brief flash), and **CLI behavior on older
+  Windows may vary**. The CLI is mainly for Linux/macOS; Windows users are expected to use the tray
+  (and the official Immich CLI exists for scripted bulk uploads).
 - IPC: HTTP over a Unix domain socket (`courier.sock` next to the config; Windows 10 1803+
   supports AF_UNIX). If that path exceeds ~100 bytes (sun_path limit), a hashed name in a private
   per-user dir is used (`$XDG_RUNTIME_DIR` on Linux, else `<tmp>/immich-courier-<user>`, must be 0700).

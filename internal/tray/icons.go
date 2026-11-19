@@ -37,6 +37,10 @@ func iconBytes(s iconState) []byte {
 	return pngBytes(render(s, 64))
 }
 
+// AppIconICO is the application icon for the Windows executable, at the
+// sizes Explorer and the taskbar use.
+func AppIconICO() []byte { return ico(iconIdle, 16, 20, 24, 32, 40, 48, 64, 256) }
+
 // render draws the icon at size×size with 4×4 supersampling for smooth edges.
 // Shapes are defined on a 0..1 unit square.
 func render(s iconState, size int) *image.NRGBA {

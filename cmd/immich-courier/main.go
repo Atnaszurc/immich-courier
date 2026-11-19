@@ -24,14 +24,19 @@ import (
 var version = "dev" // set with -ldflags "-X main.version=..."
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	args := os.Args[1:]
+	if len(args) == 0 {
+		if !guiAvailable() {
+			usage()
+			os.Exit(2)
+		}
+		args = []string{"tray"} // double-click / start at login
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	cmds := map[string]func(context.Context, []string) error{
+		"tray":          cmdTray,
 		"run":           cmdRun,
 		"status":        cmdStatus,
 		"pause":         ipcCmd("pause", (*daemon.Client).Pause, "Uploads paused. Files are still watched and queued."),
@@ -44,7 +49,7 @@ func main() {
 		"remove-folder": cmdRemoveFolder,
 		"list":          cmdList,
 	}
-	switch os.Args[1] {
+	switch args[0] {
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -52,12 +57,12 @@ func main() {
 		fmt.Println("immich-courier", version)
 		return
 	}
-	f, ok := cmds[os.Args[1]]
+	f, ok := cmds[args[0]]
 	if !ok {
 		usage()
 		os.Exit(2)
 	}
-	if err := f(ctx, os.Args[2:]); err != nil {
+	if err := f(ctx, args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -74,7 +79,8 @@ Setup:
   list           show accounts and folders
 
 Running:
-  run            watch and upload in the foreground (for servers; desktops use immich-courier-tray)
+  tray           watch and upload with a system tray icon (the default with no arguments)
+  run            watch and upload in the foreground, no tray (for servers)
   status         show what a running instance is doing
   pause|resume   pause or resume uploads (watching and queuing continue)
   rescan         rescan folders now and retry waiting uploads

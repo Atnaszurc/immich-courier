@@ -23,14 +23,18 @@ See [SPEC.md](SPEC.md) for the design.
 ## Quick start (from source)
 
 ```sh
-go build -o bin/ ./cmd/...        # on Windows add: -ldflags -H=windowsgui for the tray binary
+go build -o bin/ ./cmd/immich-courier
 
 immich-courier login --account personal --server https://photos.example.com
 immich-courier add-folder --path ~/Pictures/ToImmich --account personal
-immich-courier-tray               # desktop: tray icon, "Start at login" in its menu
-# or, on a server:
-immich-courier run
+immich-courier                    # desktop: runs in the tray; "Start at login" is in its menu
+immich-courier run                # server: headless, in the foreground
 ```
+
+It's a single program: started without arguments it runs in the system tray;
+with arguments it's a command-line tool. On Windows, the command line is
+mainly tested on Windows 11 24H2 and later and may behave differently on older
+versions. For scripted bulk uploads, the official Immich CLI is a good fit.
 
 `login` picks the best method the server offers: your Immich SSO (OIDC), email and
 password, or a pasted API key. Either way the app stores its own upload-only API
