@@ -12,8 +12,11 @@ import (
 
 	"fyne.io/systray"
 
+	"immich-courier/internal/auth"
+	"immich-courier/internal/config"
 	"immich-courier/internal/daemon"
 	"immich-courier/internal/tray"
+	"immich-courier/internal/webui"
 )
 
 const maxLogSize = 5 << 20
@@ -49,6 +52,10 @@ func cmdTray(ctx context.Context, args []string) error {
 	log.Info("immich-courier started with tray", "version", version, "config", *cfgPath)
 	fmt.Fprintln(os.Stderr, "immich-courier is running in the system tray. Log:", logPath)
 
+	ui := webui.New(d)
+	defer ui.Close()
+	d.OpenSettings = ui.URL // before Run, so IPC never sees it unset
+
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
@@ -60,11 +67,30 @@ func cmdTray(ctx context.Context, args []string) error {
 		systray.Quit()
 	}()
 
+	openSettings := func() {
+		u, err := ui.URL()
+		if err != nil {
+			log.Error("can't open settings", "err", err)
+			tray.ShowError("Can't open settings:\n\n" + err.Error())
+			return
+		}
+		if err := auth.OpenBrowser(u); err != nil {
+			log.Error("can't open browser", "err", err)
+		}
+	}
+	firstRun := false
+	if cfg, err := config.Load(*cfgPath); err == nil && len(cfg.Accounts) == 0 {
+		firstRun = true
+	}
+
 	launchArgs := []string{"tray"}
 	if *cfgPath != defaultConfigPath() {
 		launchArgs = append(launchArgs, "--config", *cfgPath)
 	}
-	tray.Run(ctx, d, tray.Options{ConfigPath: *cfgPath, LogPath: logPath, LaunchArgs: launchArgs})
+	tray.Run(ctx, d, tray.Options{
+		ConfigPath: *cfgPath, LogPath: logPath, LaunchArgs: launchArgs,
+		OpenSettings: openSettings, FirstRun: firstRun,
+	})
 	// Tray closed (Quit, or the session is ending): stop the daemon and wait,
 	// so the state DB and socket are closed cleanly.
 	d.Quit()

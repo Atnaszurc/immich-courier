@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>immich-courier settings</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <img src="/icon.svg" alt="" width="28" height="28">
+    <span>immich-courier</span>
+  </div>
+  <div class="top-status">
+    <span id="status-pill" class="pill">Loading…</span>
+    <button id="btn-pause" class="btn ghost" type="button" hidden>Pause uploads</button>
+    <button id="btn-rescan" class="btn ghost" type="button" hidden title="Rescan folders and retry waiting uploads">Check now</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner" hidden></div>
+
+  <section aria-labelledby="h-accounts">
+    <div class="section-head">
+      <h2 id="h-accounts">Accounts</h2>
+      <button id="btn-add-account" class="btn" type="button">Add account</button>
+    </div>
+    <p class="hint">Each account is an Immich user on a server. The app keeps an upload-only key for it in your system's keychain.</p>
+    <div id="accounts" class="cards"></div>
+  </section>
+
+  <section aria-labelledby="h-folders">
+    <div class="section-head">
+      <h2 id="h-folders">Watched folders</h2>
+      <button id="btn-add-folder" class="btn" type="button">Add folder</button>
+    </div>
+    <p class="hint">Photos and videos added to these folders are uploaded to the chosen account. Deleting a file here never deletes it in Immich.</p>
+    <div id="folders" class="list"></div>
+  </section>
+</main>
+
+<footer id="footer"></footer>
+
+<!-- Add / re-login account -->
+<dialog id="dlg-account">
+  <form method="dialog" class="dlg" id="form-account" novalidate>
+    <h3 id="acct-title">Add an account</h3>
+
+    <div id="step-server">
+      <label for="in-server">Immich server address</label>
+      <input id="in-server" type="url" inputmode="url" autocomplete="url" placeholder="https://photos.example.com" required>
+      <p class="hint">The same address you use for Immich in your browser.</p>
+    </div>
+
+    <div id="step-login" hidden>
+      <p id="server-info" class="server-info"></p>
+      <label for="in-name">Account name in this app</label>
+      <input id="in-name" type="text" maxlength="40" autocomplete="off" required>
+      <p class="hint">Just a label for you, e.g. "personal" or "Instagram".</p>
+
+      <div id="method-oidc" class="method" hidden>
+        <button id="btn-oidc" class="btn primary wide" type="button">Log in with single sign-on</button>
+        <p class="hint">Opens your Immich login page. You'll come back here afterwards.
+          If that page says the redirect address is invalid, your Immich admin needs to allow
+          <code>http://127.0.0.1:47823/callback</code> in the login provider; until then, use another option below.</p>
+      </div>
+
+      <details id="method-password" class="method">
+        <summary>Log in with email and password</summary>
+        <label for="in-email">Email</label>
+        <input id="in-email" type="email" autocomplete="username">
+        <label for="in-password">Password</label>
+        <input id="in-password" type="password" autocomplete="current-password">
+        <button id="btn-password" class="btn primary" type="button">Log in</button>
+        <p class="hint">Your password is only used once to create an upload key. It is never stored.</p>
+      </details>
+
+      <details id="method-apikey" class="method">
+        <summary>Use an API key</summary>
+        <p class="hint">In Immich, open <a id="apikey-link" href="#" target="_blank" rel="noopener noreferrer">Account settings → API keys</a>, create a key with the permissions <code>asset.upload</code> and <code>user.read</code>, and paste it here.</p>
+        <label for="in-apikey">API key</label>
+        <input id="in-apikey" type="password" autocomplete="off">
+        <button id="btn-apikey" class="btn primary" type="button">Save key</button>
+      </details>
+    </div>
+
+    <p id="acct-error" class="error" role="alert" hidden></p>
+    <div class="dlg-actions">
+      <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
+      <button id="btn-continue" class="btn primary" type="button">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add folder -->
+<dialog id="dlg-folder">
+  <form method="dialog" class="dlg wide" id="form-folder" novalidate>
+    <h3>Watch a folder</h3>
+    <div class="picker">
+      <div class="picker-bar">
+        <button id="btn-up" class="btn ghost small" type="button" title="Up one level">↑ Up</button>
+        <div id="roots" class="roots"></div>
+        <code id="cur-path" class="cur-path"></code>
+      </div>
+      <ul id="dir-list" class="dir-list" role="listbox" aria-label="Folders"></ul>
+      <div class="picker-new">
+        <input id="in-newdir" type="text" placeholder="New folder name" maxlength="120">
+        <button id="btn-mkdir" class="btn ghost small" type="button">Create</button>
+      </div>
+    </div>
+    <label for="sel-account">Upload to account</label>
+    <select id="sel-account"></select>
+    <p id="folder-error" class="error" role="alert" hidden></p>
+    <div class="dlg-actions">
+      <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
+      <button id="btn-watch" class="btn primary" type="button">Watch this folder</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

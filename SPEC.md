@@ -177,9 +177,24 @@ vendoring Immich's generated SDK or copying server code.
 - Start at login, per user, no admin: HKCU Run key / LaunchAgent plist / XDG autostart .desktop.
 - Measured on Windows: tray process ~26 MB working set with 2,000 queued files.
 
+### Settings page (2026-11-19)
+
+- Decision: settings live in the user's browser, not a native window. Keeps the binary small and
+  pure Go, costs nothing while closed, and SSO login already happens in the browser.
+- Served by the running instance (`internal/webui`) on `127.0.0.1:<random port>`, started on demand
+  (tray "Settings…", `immich-courier settings`, automatically on first start with no accounts) and
+  stopped after 30 idle minutes.
+- Security: random session token in the opening URL → HttpOnly SameSite=Lax cookie (Lax because the
+  SSO return is a cross-site redirect chain), exact Host check (DNS rebinding), custom header +
+  Origin check on every POST (CSRF), strict CSP, no external resources. Covered by tests.
+- Features: add account (server probe → SSO / email+password / API key), log in again, remove
+  account (only when no folder uses it), watch/stop watching folders via an in-page folder browser
+  (browsers can't hand real paths to a page), create folder, pause/resume, check now, live status.
+- Headless servers: `immich-courier settings --print` gives the URL to open through an SSH tunnel.
+- All account logic is shared with the CLI (`internal/accounts`).
+
 ## Open decisions
 
-- Settings window (adding accounts and folders without the CLI): toolkit and whether it's a
-  separate process launched from the tray.
 - Linux headless: ship a systemd user unit for `immich-courier run`.
 - Release builds: CI for Windows/Linux (pure Go) + macOS runner (CGO), signing/notarization.
+- Per-folder options (album, post-upload action) in the settings page.

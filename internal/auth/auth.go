@@ -50,6 +50,9 @@ type OIDCOptions struct {
 	OpenBrowser func(url string) error // nil means the OS default browser
 	Timeout     time.Duration          // 0 means 5 minutes
 	OnURL       func(url string)       // called with the login URL (e.g. to print it)
+	// ReturnURL, if set, is where the browser goes after the provider
+	// redirects back (e.g. the settings page). Must be an http(s) URL.
+	ReturnURL string
 }
 
 // OIDCLogin runs Immich's OAuth login through the system browser with a
@@ -97,10 +100,15 @@ func OIDCLogin(ctx context.Context, c *immich.Client, opt OIDCOptions) (Session,
 			res.url = redirectURI + "?" + r.URL.RawQuery
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if res.err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		switch {
+		case opt.ReturnURL != "":
+			// The settings page shows the outcome; go straight back to it.
+			http.Redirect(w, r, opt.ReturnURL, http.StatusSeeOther)
+		case res.err != nil:
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, page("Login failed", "Go back to immich-courier for details."))
-		} else {
+		default:
 			fmt.Fprint(w, page("Logged in", "You can close this window and return to immich-courier."))
 		}
 		select {

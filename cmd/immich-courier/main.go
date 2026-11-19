@@ -14,11 +14,13 @@ import (
 	"github.com/zalando/go-keyring"
 	"golang.org/x/term"
 
+	"immich-courier/internal/accounts"
 	"immich-courier/internal/auth"
 	"immich-courier/internal/config"
 	"immich-courier/internal/daemon"
 	"immich-courier/internal/immich"
 	"immich-courier/internal/state"
+	"immich-courier/internal/webui"
 )
 
 var version = "dev" // set with -ldflags "-X main.version=..."
@@ -37,6 +39,7 @@ func main() {
 
 	cmds := map[string]func(context.Context, []string) error{
 		"tray":          cmdTray,
+		"settings":      cmdSettings,
 		"run":           cmdRun,
 		"status":        cmdStatus,
 		"pause":         ipcCmd("pause", (*daemon.Client).Pause, "Uploads paused. Files are still watched and queued."),
@@ -71,7 +74,11 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `immich-courier: watch folders and upload new photos/videos to Immich
 
+Start it without arguments to run in the system tray; set it up from the
+tray's Settings page. The commands below are for scripting and servers.
+
 Setup:
+  settings       open the settings page of the running instance [--print]
   login          --account NAME --server URL [--method auto|oidc|password|apikey]
   logout         --account NAME
   add-folder     --path DIR --account NAME
@@ -117,6 +124,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	ui := webui.New(d)
+	defer ui.Close()
+	d.OpenSettings = ui.URL // `immich-courier settings --print` gives the URL
 	log.Info("immich-courier started", "version", version, "config", *cfgPath)
 	err = d.Run(ctx)
 	log.Info("immich-courier stopped")
@@ -307,17 +317,17 @@ func cmdLogin(ctx context.Context, args []string) error {
 		fs.Usage()
 		return errors.New("--account and --server are required")
 	}
-
-	c := immich.New(*server)
-	if err := c.Ping(ctx); err != nil {
-		return fmt.Errorf("can't reach Immich at %s: %w", *server, err)
+	if err := accounts.ValidName(*account); err != nil {
+		return err
 	}
-	ver, _ := c.Version(ctx)
-	feat, err := c.Features(ctx)
+	info, err := accounts.Probe(ctx, *server)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Immich %s at %s (OAuth: %v, password login: %v)\n", ver, *server, feat.OAuth, feat.PasswordLogin)
+	*server = info.Server
+	c := immich.New(*server)
+	feat := info
+	fmt.Printf("Immich %s at %s (OAuth: %v, password login: %v)\n", info.Version, *server, feat.OAuth, feat.PasswordLogin)
 
 	m := *method
 	if m == "auto" {
@@ -364,16 +374,15 @@ func cmdLogin(ctx context.Context, args []string) error {
 			}
 		}
 		fmt.Printf("Logged in as %s <%s>\n", s.Name, s.Email)
-		host, _ := os.Hostname()
-		key, err := auth.MintAPIKey(ctx, *server, s, "immich-courier ("+host+")")
-		if err != nil && key.Secret == "" {
+		var warn error
+		secret, warn, err = accounts.KeyFromSession(ctx, *server, s)
+		if err != nil {
 			return err
 		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "warning:", err)
+		if warn != nil {
+			fmt.Fprintln(os.Stderr, "warning:", warn)
 		}
-		fmt.Printf("Created API key %q with permissions %v\n", key.Name, key.Permissions)
-		secret = key.Secret
+		fmt.Printf("Created an upload-only API key (permissions: %s)\n", strings.Join(auth.Permissions, ", "))
 	case "apikey":
 		fmt.Printf("Create an API key in Immich (Account settings → API keys) with at least %v,\nthen paste it here.\n", auth.Permissions)
 		_ = auth.OpenBrowser(strings.TrimRight(*server, "/") + "/user-settings?isOpen=api-keys")
@@ -385,29 +394,36 @@ func cmdLogin(ctx context.Context, args []string) error {
 		return fmt.Errorf("unknown method %q", m)
 	}
 
-	// Verify the key before storing it.
-	kc := immich.New(*server)
-	kc.APIKey = secret
-	if u, err := kc.Me(ctx); err != nil {
-		return fmt.Errorf("the API key doesn't work: %w", err)
-	} else {
-		fmt.Printf("API key works: uploads will go to %s <%s>\n", u.Name, u.Email)
-	}
-	if err := keyring.Set(daemon.KeyringService, *account, secret); err != nil {
-		return fmt.Errorf("store key in OS keychain: %w", err)
-	}
-	fmt.Printf("Stored in the OS keychain as %s/%s\n", daemon.KeyringService, *account)
-
-	cfg, err := config.Load(*cfgPath)
+	u, err := accounts.Save(ctx, *cfgPath, *account, *server, secret)
 	if err != nil {
 		return err
 	}
-	cfg.SetAccount(config.Account{Name: *account, Server: strings.TrimRight(*server, "/")})
-	if err := cfg.Save(*cfgPath); err != nil {
+	fmt.Printf("Uploads for account %q will go to %s <%s>. Key stored in the OS keychain.\n", *account, u.Name, u.Email)
+	notifyReload(ctx, *cfgPath)
+	return nil
+}
+
+func cmdSettings(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("settings", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	noBrowser := fs.Bool("print", false, "only print the URL (e.g. on a server, open it through an SSH tunnel)")
+	fs.Parse(args)
+	c, err := daemon.Dial(*cfgPath)
+	if err != nil {
+		return fmt.Errorf("%w; start it first (run immich-courier without arguments, or immich-courier run)", err)
+	}
+	u, err := c.SettingsURL(ctx)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Account %q saved to %s.\n", *account, *cfgPath)
-	notifyReload(ctx, *cfgPath)
+	if !*noBrowser {
+		if err := auth.OpenBrowser(u); err == nil {
+			fmt.Println("Opened settings in your browser.")
+			return nil
+		}
+	}
+	fmt.Println("Settings page (valid while immich-courier runs; closes after 30 idle minutes):")
+	fmt.Println("  " + u)
 	return nil
 }
 

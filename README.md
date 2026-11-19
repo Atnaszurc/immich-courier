@@ -20,31 +20,37 @@ server. Each folder can upload to a different Immich account.
 
 See [SPEC.md](SPEC.md) for the design.
 
-## Quick start (from source)
+## Getting started
+
+1. Start `immich-courier` (on Windows, double-click it). It goes to the system tray,
+   and the first time it opens its settings page in your browser.
+2. **Add account:** enter your Immich server's address and log in with single
+   sign-on, email and password, or an API key. The app keeps its own upload-only
+   key in your system's keychain, never your password.
+3. **Add folder:** pick a folder and the account it uploads to.
+4. In the tray menu, turn on **Start at login**.
+
+Settings are always available from the tray icon → **Settings…**. They open in your
+browser but are served by the app itself on your computer (127.0.0.1 only).
+
+**Single sign-on:** your Immich admin must allow `http://127.0.0.1:47823/callback`
+as a redirect address for Immich's OAuth client in the login provider. Email and
+password or an API key work without that.
+
+### Command line and servers
+
+The same program is a command-line tool when given arguments: `login`,
+`add-folder`, `status`, `pause`, `resume`, `rescan`, `stop`, `list`, `run`
+(headless, for servers) and `settings --print` (URL for an SSH tunnel). Run
+`immich-courier help` for details. On Windows the command line is mainly meant
+for Windows 11 24H2 and later and may behave differently on older versions. For
+scripted bulk uploads, the official Immich CLI is a good fit.
+
+### Building from source
 
 ```sh
 go build -o bin/ ./cmd/immich-courier
-
-immich-courier login --account personal --server https://photos.example.com
-immich-courier add-folder --path ~/Pictures/ToImmich --account personal
-immich-courier                    # desktop: runs in the tray; "Start at login" is in its menu
-immich-courier run                # server: headless, in the foreground
 ```
-
-It's a single program: started without arguments it runs in the system tray;
-with arguments it's a command-line tool. On Windows, the command line is
-mainly tested on Windows 11 24H2 and later and may behave differently on older
-versions. For scripted bulk uploads, the official Immich CLI is a good fit.
-
-`login` picks the best method the server offers: your Immich SSO (OIDC), email and
-password, or a pasted API key. Either way the app stores its own upload-only API
-key in the OS keychain, never your password.
-
-For OIDC login, the Immich admin must add `http://127.0.0.1:47823/callback` as an
-allowed redirect URI for Immich's OAuth client in their identity provider.
-
-Other commands: `status`, `pause`, `resume`, `rescan`, `stop`, `list`,
-`remove-folder`, `logout`.
 
 ## No promises
 

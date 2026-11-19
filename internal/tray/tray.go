@@ -24,6 +24,10 @@ type Options struct {
 	LogPath    string
 	// LaunchArgs are the arguments to start the tray with at login (e.g. --config).
 	LaunchArgs []string
+	// OpenSettings opens the settings page in the browser.
+	OpenSettings func()
+	// FirstRun opens the settings page right away (nothing configured yet).
+	FirstRun bool
 }
 
 // Run shows the tray and blocks until the user quits or d stops. It must be
@@ -47,6 +51,7 @@ func onReady(ctx context.Context, d *daemon.Daemon, opt Options) {
 		mAccts = append(mAccts, m)
 	}
 	systray.AddSeparator()
+	mSettings := systray.AddMenuItem("Settings…", "Accounts and watched folders")
 	mPause := systray.AddMenuItemCheckbox("Pause uploads", "Keep watching and queuing, but don't upload", false)
 	mRescan := systray.AddMenuItem("Check folders now", "Rescan watched folders and retry waiting uploads")
 	mFolders := systray.AddMenuItem("Open folder", "")
@@ -71,6 +76,10 @@ func onReady(ctx context.Context, d *daemon.Daemon, opt Options) {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit immich-courier", "Stop watching and uploading")
 
+	if opt.FirstRun && opt.OpenSettings != nil {
+		go opt.OpenSettings()
+	}
+
 	refresh := make(chan struct{}, 1)
 	poke := func() {
 		select {
@@ -87,6 +96,10 @@ func onReady(ctx context.Context, d *daemon.Daemon, opt Options) {
 			case <-mPause.ClickedCh:
 				d.SetPaused(!mPause.Checked())
 				poke()
+			case <-mSettings.ClickedCh:
+				if opt.OpenSettings != nil {
+					opt.OpenSettings()
+				}
 			case <-mRescan.ClickedCh:
 				d.Rescan()
 			case <-mConfig.ClickedCh:

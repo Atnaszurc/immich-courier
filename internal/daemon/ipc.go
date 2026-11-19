@@ -20,6 +20,7 @@ import (
 //
 //	GET  /v1/status
 //	POST /v1/pause | /v1/resume | /v1/rescan | /v1/reload | /v1/quit
+//	POST /v1/settings  -> {"url": ...} settings page URL (with session token)
 
 func (d *Daemon) serveIPC(ctx context.Context) error {
 	path := SocketPath(d.CfgPath)
@@ -53,6 +54,19 @@ func (d *Daemon) serveIPC(ctx context.Context) error {
 	mux.HandleFunc("POST /v1/rescan", action(func() error { d.Rescan(); return nil }))
 	mux.HandleFunc("POST /v1/reload", action(d.Reload))
 	mux.HandleFunc("POST /v1/quit", action(func() error { d.Quit(); return nil }))
+	mux.HandleFunc("POST /v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		if d.OpenSettings == nil {
+			http.Error(w, "settings page not available", http.StatusNotFound)
+			return
+		}
+		u, err := d.OpenSettings()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"url": u})
+	})
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -146,4 +160,13 @@ func (c *Client) Reload(ctx context.Context) error {
 }
 func (c *Client) Quit(ctx context.Context) error {
 	return c.call(ctx, http.MethodPost, "/v1/quit", nil)
+}
+
+// SettingsURL asks the running instance to start its settings page.
+func (c *Client) SettingsURL(ctx context.Context) (string, error) {
+	var r struct {
+		URL string `json:"url"`
+	}
+	err := c.call(ctx, http.MethodPost, "/v1/settings", &r)
+	return r.URL, err
 }

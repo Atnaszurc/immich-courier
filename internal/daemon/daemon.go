@@ -20,12 +20,13 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"immich-courier/internal/accounts"
 	"immich-courier/internal/config"
 	"immich-courier/internal/engine"
 	"immich-courier/internal/state"
 )
 
-const KeyringService = "immich-courier"
+const KeyringService = accounts.KeyringService
 
 // Paths derived from the config file location.
 func StatePath(cfgPath string) string { return filepath.Join(filepath.Dir(cfgPath), "state.db") }
@@ -82,6 +83,9 @@ type Daemon struct {
 	Log     *slog.Logger
 	// EngineOptions overrides timings (tests); settle/rescan come from config otherwise.
 	EngineOptions *engine.Options
+	// OpenSettings starts the settings page if needed and returns its URL.
+	// Set by the program; nil means settings aren't available.
+	OpenSettings func() (string, error)
 
 	store   *state.Store
 	started time.Time
