@@ -6,15 +6,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/term"
 
 	"immich-courier/internal/auth"
+	"immich-courier/internal/config"
+	"immich-courier/internal/engine"
 	"immich-courier/internal/immich"
+	"immich-courier/internal/state"
 )
 
 const keyringService = "immich-courier"
@@ -29,10 +34,18 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "run":
+		err = cmdRun(ctx, os.Args[2:])
 	case "login":
 		err = cmdLogin(ctx, os.Args[2:])
 	case "logout":
 		err = cmdLogout(os.Args[2:])
+	case "add-folder":
+		err = cmdAddFolder(os.Args[2:])
+	case "remove-folder":
+		err = cmdRemoveFolder(os.Args[2:])
+	case "list":
+		err = cmdList(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -50,13 +63,173 @@ func usage() {
 	fmt.Fprint(os.Stderr, `immich-courier: watch folders and upload new photos/videos to Immich
 
 Commands:
-  login   --account NAME --server URL [--method auto|oidc|password|apikey]
-  logout  --account NAME
+  login          --account NAME --server URL [--method auto|oidc|password|apikey]
+  logout         --account NAME
+  add-folder     --path DIR --account NAME
+  remove-folder  --path DIR
+  list           show accounts, folders and upload counts
+  run            watch folders and upload (runs until stopped)
+
+Every command takes --config FILE (default: `+defaultConfigPath()+`).
 `)
+}
+
+func defaultConfigPath() string {
+	p, err := config.DefaultPath()
+	if err != nil {
+		return "config.toml"
+	}
+	return p
+}
+
+func configFlag(fs *flag.FlagSet) *string {
+	return fs.String("config", defaultConfigPath(), "config file")
+}
+
+func statePath(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), "state.db")
+}
+
+func cmdRun(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	verbose := fs.Bool("v", false, "debug logging")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	level := slog.LevelInfo
+	if *verbose {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	keys := map[string]string{}
+	for _, f := range cfg.Folders {
+		if _, done := keys[f.Account]; done {
+			continue
+		}
+		k, err := keyring.Get(keyringService, f.Account)
+		if err != nil {
+			return fmt.Errorf("no API key for account %q in the OS keychain (%v); run login first", f.Account, err)
+		}
+		if strings.IndexFunc(k, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+			return fmt.Errorf("the API key stored for account %q is malformed; run login again", f.Account)
+		}
+		keys[f.Account] = k
+	}
+	if err := os.MkdirAll(filepath.Dir(*cfgPath), 0o700); err != nil {
+		return err
+	}
+	store, err := state.Open(statePath(*cfgPath))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	e, err := engine.New(cfg, keys, store, log, engine.Options{
+		Settle: cfg.Settings.Settle(),
+		Rescan: cfg.Settings.Rescan(),
+	})
+	if err != nil {
+		return err
+	}
+	log.Info("immich-courier started", "config", *cfgPath)
+	err = e.Run(ctx)
+	log.Info("immich-courier stopped")
+	return err
+}
+
+func cmdAddFolder(args []string) error {
+	fs := flag.NewFlagSet("add-folder", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	path := fs.String("path", "", "folder to watch (required)")
+	account := fs.String("account", "", "account to upload to (required)")
+	fs.Parse(args)
+	if *path == "" || *account == "" {
+		return errors.New("--path and --account are required")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if err := cfg.AddFolder(config.Folder{Path: *path, Account: *account}); err != nil {
+		return err
+	}
+	if err := cfg.Save(*cfgPath); err != nil {
+		return err
+	}
+	fmt.Printf("Watching %s for account %q (takes effect when immich-courier run is (re)started)\n", cfg.Folders[len(cfg.Folders)-1].Path, *account)
+	return nil
+}
+
+func cmdRemoveFolder(args []string) error {
+	fs := flag.NewFlagSet("remove-folder", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	path := fs.String("path", "", "watched folder to remove (required)")
+	fs.Parse(args)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	ok, err := cfg.RemoveFolder(*path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s is not a watched folder", *path)
+	}
+	if err := cfg.Save(*cfgPath); err != nil {
+		return err
+	}
+	fmt.Println("Removed. Files already in Immich are not affected.")
+	return nil
+}
+
+func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	fs.Parse(args)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Config:", *cfgPath)
+	if len(cfg.Accounts) == 0 {
+		fmt.Println("No accounts yet. Start with: immich-courier login --account NAME --server URL")
+		return nil
+	}
+	var counts map[string]map[state.Status]int
+	if st, err := state.Open(statePath(*cfgPath)); err == nil {
+		counts, _ = st.Counts()
+		st.Close()
+	} else {
+		fmt.Println("(upload counts unavailable while immich-courier run is active)")
+	}
+	for _, a := range cfg.Accounts {
+		_, keyErr := keyring.Get(keyringService, a.Name)
+		key := "API key in keychain"
+		if keyErr != nil {
+			key = "NO API KEY (run login)"
+		}
+		fmt.Printf("\nAccount %q  %s  [%s]\n", a.Name, a.Server, key)
+		if c := counts[a.Name]; c != nil {
+			fmt.Printf("  uploaded %d, already in Immich %d, queued %d, failed %d, rejected %d\n",
+				c[state.Uploaded], c[state.Duplicate], c[state.Queued], c[state.Failed], c[state.Rejected])
+		}
+		for _, f := range cfg.Folders {
+			if f.Account == a.Name {
+				fmt.Println("  watching", f.Path)
+			}
+		}
+	}
+	return nil
 }
 
 func cmdLogin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	cfgPath := configFlag(fs)
 	account := fs.String("account", "", "account profile name, e.g. personal (required)")
 	server := fs.String("server", "", "Immich server URL, e.g. https://photos.example.com (required)")
 	method := fs.String("method", "auto", "auto, oidc, password or apikey")
@@ -157,6 +330,16 @@ func cmdLogin(ctx context.Context, args []string) error {
 		return fmt.Errorf("store key in OS keychain: %w", err)
 	}
 	fmt.Printf("Stored in the OS keychain as %s/%s\n", keyringService, *account)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	cfg.SetAccount(config.Account{Name: *account, Server: strings.TrimRight(*server, "/")})
+	if err := cfg.Save(*cfgPath); err != nil {
+		return err
+	}
+	fmt.Printf("Account %q saved to %s. Next: immich-courier add-folder --path DIR --account %s\n", *account, *cfgPath, *account)
 	return nil
 }
 

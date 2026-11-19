@@ -140,7 +140,20 @@ vendoring Immich's generated SDK or copying server code.
 - Sidecars (.xmp), Live Photos (HEIC+MOV), RAW+JPEG pairing.
 - Pause/resume, bandwidth limit, metered-network awareness.
 
+## Implementation notes (2026-11-19)
+
+- State DB: **bbolt** (pure Go, no CGO). One process holds it, so a running daemon's
+  status must come over IPC, not by opening the DB.
+- File types come from `GET /api/server/media-types` (unauthenticated), cached per server;
+  a built-in list is used until the server has been reached once. `.xmp` sidecars are ignored for now.
+- Error handling: network errors and HTTP 5xx pause the account (backoff grows with consecutive
+  failures, so a server that answers ping but fails uploads isn't hammered); 401 stops the account
+  until login is re-run; other 4xx mark the file failed with retry (1 min doubling, max 6 h).
+- Measured on Windows: 8.4 MB binary (stripped); ~19 MB working set after scanning, hashing and
+  queuing 2,000 files, steady while idle.
+
 ## Open decisions
 
 - Settings UI toolkit.
-- State DB: SQLite (modernc, pure Go) vs bbolt.
+- IPC mechanism between daemon, CLI and settings UI (named pipe / unix socket).
+- Running at login: per-OS autostart (Startup folder / LaunchAgent / systemd user unit).

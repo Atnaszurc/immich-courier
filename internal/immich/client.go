@@ -95,7 +95,9 @@ func (c *Client) Ping(ctx context.Context) error {
 	var r struct {
 		Res string `json:"res"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/server/ping", nil, &r); err != nil {
+	anon := *c // ping needs no credentials; don't send them
+	anon.APIKey, anon.AccessToken = "", ""
+	if err := anon.do(ctx, http.MethodGet, "/server/ping", nil, &r); err != nil {
 		return err
 	}
 	if r.Res != "pong" {
