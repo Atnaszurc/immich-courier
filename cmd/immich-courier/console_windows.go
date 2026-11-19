@@ -7,8 +7,8 @@ import (
 )
 
 //go:generate go run ../../tools/winicon -o winres/app.ico
-//go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest winres/app.manifest -ico winres/app.ico -arch amd64 -o rsrc_windows_amd64.syso
-//go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest winres/app.manifest -ico winres/app.ico -arch arm64 -o rsrc_windows_arm64.syso
+//go:generate go tool rsrc -manifest winres/app.manifest -ico winres/app.ico -arch amd64 -o rsrc_windows_amd64.syso
+//go:generate go tool rsrc -manifest winres/app.manifest -ico winres/app.ico -arch arm64 -o rsrc_windows_arm64.syso
 
 func isWindows() bool { return true }
 func isDarwin() bool  { return false }

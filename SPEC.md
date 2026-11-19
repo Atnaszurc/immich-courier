@@ -161,7 +161,8 @@ vendoring Immich's generated SDK or copying server code.
   sets `consoleAllocationPolicy=detached` (Windows 11 24H2 / build 26100+), so starting it from
   Explorer or at login opens no console window; verified on build 26300. Older Windows ignores the
   policy: the tray then frees the console it was given (a brief flash), and **CLI behavior on older
-  Windows may vary**. The CLI is mainly for Linux/macOS; Windows users are expected to use the tray
+  Windows may vary**. Manifest + exe icon are embedded via `rsrc` (pinned with `go get -tool`);
+  the generated `rsrc_windows_*.syso` files are committed, regenerate with `go generate ./cmd/immich-courier`. The CLI is mainly for Linux/macOS; Windows users are expected to use the tray
   (and the official Immich CLI exists for scripted bulk uploads).
 - IPC: HTTP over a Unix domain socket (`courier.sock` next to the config; Windows 10 1803+
   supports AF_UNIX). If that path exceeds ~100 bytes (sun_path limit), a hashed name in a private
