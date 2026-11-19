@@ -47,21 +47,27 @@ Status: design phase. Intended to be released as open source.
 
 ## Auth
 
-1. **API key** (always supported): user pastes a key; stored in the OS keychain.
-2. **OIDC login** (if the server has OAuth enabled): loopback redirect
-   (`http://127.0.0.1:<port>/callback`) through Immich's `/api/oauth/authorize` +
-   `/api/oauth/callback` → Immich session → app creates an API key scoped to
-   upload-only permissions via `POST /api/api-keys` → stores the key in the keychain
-   and logs out the session.
+Any login Immich supports can be used. The app reads `GET /api/server/features` and offers:
+
+1. **OIDC** if `oauth: true`: loopback redirect (`http://127.0.0.1:47823/callback`) through
+   Immich's `/api/oauth/authorize` + `/api/oauth/callback`. Requires the Immich admin to register
+   that redirect URI with their identity provider (one-time, provider-agnostic).
+2. **Email + password** if `passwordLogin: true`: `POST /api/auth/login`.
+3. **Paste an API key**: always available; the app opens Immich's API key page.
+
+Methods 1 and 2 give a temporary session, which the app uses to create its own API key
+(`POST /api/api-keys`, permissions `asset.upload` + `user.read`) and then logs out.
+Every method ends with an API key in the OS keychain. Passwords and session tokens are never stored.
+`login --method auto` picks OIDC, then password, then API key.
 
 ### OIDC findings (spike, 2026-11-19, Immich v3.3.5)
 
 - Immich does **not** restrict `redirectUri`: `POST /api/oauth/authorize` with
   `http://127.0.0.1:<port>/callback` returns a provider URL with that redirect, PKCE (S256)
   and state. No auth needed for this call.
-- Immich keeps state + PKCE verifier in cookies (`immich_oauth_state`,
-  `immich_oauth_code_verifier`) set on the authorize response. The app must keep a cookie
-  jar between authorize and `POST /api/oauth/callback` (without them: "OAuth state is missing").
+- Immich keeps state + PKCE verifier in cookies by default, but in v3 `OAuthConfigDto` accepts
+  client-generated `state` + `codeChallenge`, and `OAuthCallbackDto` takes `state` + `codeVerifier`.
+  Verified: Immich passes our own state/challenge through to the provider. So no cookie jar needed.
 - The **identity provider** is the gate: a redirect URI that isn't registered is rejected
   (tested: Authentik with strict matching → 400 "mismatching redirection URI").
   So OIDC login only works if the Immich admin registers the app's loopback URI with their
@@ -96,9 +102,10 @@ Secrets never go in the config file; config references a keychain entry.
 
 ## Coexistence with the mobile app
 
-- Uses its own `deviceId` (e.g. `immich-courier-<hostname>`) and
-  `deviceAssetId` derived from the file path + mtime.
-- Checksum dedupe means files already backed up from a phone are skipped, not duplicated.
+- Immich v3 removed `deviceId`/`deviceAssetId` from asset upload, so there's no per-device
+  bookkeeping to collide with.
+- SHA1 checksum dedupe (`bulk-upload-check`) means files already backed up from a phone are
+  skipped, not duplicated.
 
 ## Multi-account
 
