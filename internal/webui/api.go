@@ -318,13 +318,14 @@ func (s *Server) apiLoginOIDCStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiRemoveAccount(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name string `json:"name"`
+		Name        string `json:"name"`
+		WithFolders bool   `json:"withFolders"` // also stop watching its folders
 	}
 	if err := readJSON(r, &in); err != nil {
 		fail(w, 400, err)
 		return
 	}
-	if err := accounts.Remove(s.d.CfgPath, in.Name); err != nil {
+	if err := accounts.Remove(s.d.CfgPath, in.Name, in.WithFolders); err != nil {
 		fail(w, 400, err)
 		return
 	}

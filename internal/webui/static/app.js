@@ -187,8 +187,6 @@ function renderAccounts() {
           }, needLogin ? "Log in again" : "Change login"),
           h("button", {
             class: "btn ghost small danger", type: "button",
-            disabled: a.inUse,
-            title: a.inUse ? "Remove its folders first" : null,
             onclick: () => removeAccount(a),
           }, "Remove")))
     );
@@ -222,10 +220,16 @@ function renderFolders() {
 // ---- actions ------------------------------------------------------------
 
 async function removeAccount(a) {
-  if (!confirm(`Remove the account "${a.name}" from this app?\n\nNothing is deleted in Immich. The app's API key stays listed under Account settings → API keys in Immich; you can delete it there.`)) return;
+  const folders = state.folders.filter((f) => f.account === a.name).map((f) => f.path);
+  let msg = `Remove the account "${a.name}" from this app?`;
+  if (folders.length) {
+    msg += `\n\nThese folders will also stop being watched:\n${folders.map((p) => "  • " + p).join("\n")}`;
+  }
+  msg += "\n\nNothing is deleted in Immich, and files already uploaded stay there. The app's API key stays listed under Account settings → API keys in Immich; you can delete it there.";
+  if (!confirm(msg)) return;
   try {
-    await api("POST", "/api/accounts/remove", { name: a.name });
-    toast(`Removed ${a.name}`);
+    await api("POST", "/api/accounts/remove", { name: a.name, withFolders: folders.length > 0 });
+    toast(`Removed ${a.name}` + (folders.length ? ` and stopped watching ${folders.length} folder${folders.length > 1 ? "s" : ""}` : ""));
     refresh();
   } catch (e) { toast(e.message); }
 }

@@ -199,7 +199,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			if err != nil || !s.tokenOK(c.Value) {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusUnauthorized)
-				io.WriteString(w, `<!doctype html><meta charset="utf-8"><title>immich-courier</title><p style="font-family:system-ui;margin:3rem">Open <b>Settings</b> from the immich-courier tray icon to manage it.</p>`)
+				io.WriteString(w, `<!doctype html><meta charset="utf-8"><title>immich-courier</title><p>Open <b>Settings</b> from the immich-courier tray icon to manage it.</p>`)
 				return
 			}
 		}

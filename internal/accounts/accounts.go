@@ -137,18 +137,25 @@ func HasKey(name string) bool {
 }
 
 // Remove deletes an account from the config and its key from the keychain.
-// It refuses while folders still upload to the account. The API key itself
-// stays in Immich (the app's key can't delete keys).
-func Remove(cfgPath, name string) error {
+// Folders that upload to the account are only removed with it if
+// withFolders is set; otherwise it refuses while any exist. The API key
+// itself stays in Immich (the app's key can't delete keys).
+func Remove(cfgPath, name string, withFolders bool) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
+	kept := cfg.Folders[:0:0]
 	for _, f := range cfg.Folders {
-		if f.Account == name {
+		if f.Account != name {
+			kept = append(kept, f)
+			continue
+		}
+		if !withFolders {
 			return fmt.Errorf("folder %s still uploads to %q; remove that folder first", f.Path, name)
 		}
 	}
+	cfg.Folders = kept
 	found := false
 	for i, a := range cfg.Accounts {
 		if a.Name == name {

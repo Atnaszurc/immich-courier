@@ -211,4 +211,16 @@ func TestSetupFlow(t *testing.T) {
 	if _, err := keyring.Get("immich-courier", "pri"); err == nil {
 		t.Fatal("key left in keychain")
 	}
+
+	// Removing an account together with its folders in one step.
+	c.do("POST", "/api/login/apikey", map[string]string{"name": "pri", "server": im.URL, "apiKey": "good-key"}, true)
+	c.do("POST", "/api/folders/add", map[string]string{"path": newDir, "account": "pri"}, true)
+	resp, out = c.do("POST", "/api/accounts/remove", map[string]any{"name": "pri", "withFolders": true}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("remove with folders: %v", out)
+	}
+	_, out = c.do("GET", "/api/state", nil, false)
+	if len(out["accounts"].([]any)) != 0 || len(out["folders"].([]any)) != 0 {
+		t.Fatalf("account or folder left behind: %v", out)
+	}
 }
