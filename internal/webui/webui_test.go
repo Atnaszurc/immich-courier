@@ -199,6 +199,10 @@ func TestSetupFlow(t *testing.T) {
 	if len(accts) != 1 || len(folders) != 1 || accts[0].(map[string]any)["hasKey"] != true {
 		t.Fatalf("state: %v", out)
 	}
+	// Field names must match what app.js reads (f.path, f.account).
+	if f := folders[0].(map[string]any); f["path"] != newDir || f["account"] != "pri" {
+		t.Fatalf("folder JSON fields: %v", f)
+	}
 
 	// The account can't be removed while a folder uses it; it can afterwards.
 	if resp, _ = c.do("POST", "/api/accounts/remove", map[string]string{"name": "pri"}, true); resp.StatusCode != 400 {

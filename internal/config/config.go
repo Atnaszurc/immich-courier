@@ -16,23 +16,23 @@ import (
 
 type Settings struct {
 	// Seconds a file's size and mtime must stay unchanged before it's queued.
-	SettleSeconds int `toml:"settle_seconds"`
+	SettleSeconds int `toml:"settle_seconds,omitempty"`
 	// Minutes between full rescans of watched folders (safety net for missed events).
-	RescanMinutes int `toml:"rescan_minutes"`
+	RescanMinutes int `toml:"rescan_minutes,omitempty"`
 }
 
 type Account struct {
-	Name   string `toml:"name"`
-	Server string `toml:"server"`
+	Name   string `toml:"name" json:"name"`
+	Server string `toml:"server" json:"server"`
 }
 
 type Folder struct {
-	Path    string `toml:"path"`
-	Account string `toml:"account"`
+	Path    string `toml:"path" json:"path"`
+	Account string `toml:"account" json:"account"`
 }
 
 type Config struct {
-	Settings Settings  `toml:"settings"`
+	Settings Settings  `toml:"settings,omitempty"`
 	Accounts []Account `toml:"account"`
 	Folders  []Folder  `toml:"folder"`
 }

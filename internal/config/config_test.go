@@ -3,8 +3,21 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestDefaultsNotWritten(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	c := &Config{Accounts: []Account{{Name: "a", Server: "https://x"}}}
+	if err := c.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if strings.Contains(string(b), "settle_seconds") || strings.Contains(string(b), "rescan_minutes") {
+		t.Fatalf("default settings written out:\n%s", b)
+	}
+}
 
 func TestFoldersCantNest(t *testing.T) {
 	root := t.TempDir()
