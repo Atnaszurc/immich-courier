@@ -47,7 +47,7 @@ workflow from a specific commit. To check a download with the
 [GitHub CLI](https://cli.github.com):
 
 ```sh
-gh attestation verify immich-courier-v1.0.0-linux-amd64.tar.gz --repo OWNER/immich-courier
+gh attestation verify immich-courier-v1.0.0-linux-amd64.tar.gz --repo Atnaszurc/immich-courier
 ```
 
 ## Getting started
