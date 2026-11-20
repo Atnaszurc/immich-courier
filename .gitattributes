@@ -1,0 +1,6 @@
+# The Windows manifest is embedded byte for byte into the committed .syso
+# resources. Keep it LF on every checkout (Git for Windows would otherwise
+# turn it into CRLF), so the resources rebuild identically everywhere.
+cmd/immich-courier/winres/app.manifest text eol=lf
+*.syso binary
+*.ico binary
