@@ -4,7 +4,8 @@ A small background app for Windows, macOS and Linux that watches folders on your
 computer and uploads new photos and videos to your [Immich](https://immich.app)
 server. Each folder can upload to a different Immich account.
 
-> **Status: early development. Not usable yet.**
+> **Status: first release (0.1).** It works on Windows, macOS and Linux, but it is young:
+> expect rough edges, and see [No promises](#no-promises).
 
 ## What it is (and isn't)
 
