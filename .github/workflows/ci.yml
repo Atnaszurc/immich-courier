@@ -32,8 +32,14 @@ jobs:
 
   # The Windows icon and manifest resources are committed as .syso files.
   # Check that they still rebuild byte for byte from the sources in winres/.
+  # On Windows, because the go:generate lines live in a Windows-only file and
+  # also build and run a helper tool (GOOS=windows elsewhere would build that
+  # helper for the wrong OS).
   windows-resources:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,5 +49,5 @@ jobs:
           go-version-file: go.mod
       - name: Regenerate and compare
         run: |
-          GOOS=windows go generate ./cmd/immich-courier
+          go generate ./cmd/immich-courier
           git diff --exit-code -- cmd/immich-courier
