@@ -63,7 +63,7 @@ func cmdTray(ctx context.Context, args []string) error {
 			log.Error("stopped with error", "err", err)
 			tray.ShowError("immich-courier stopped because of an error:\n\n" + err.Error())
 		}
-		log.Info("immich-courier stopped")
+		log.Info("immich-courier stopped", "reason", stopReason(ctx))
 		systray.Quit()
 	}()
 

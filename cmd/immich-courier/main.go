@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 
@@ -34,8 +35,7 @@ func main() {
 		}
 		args = []string{"tray"} // double-click / start at login
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	ctx := shutdownContext()
 
 	cmds := map[string]func(context.Context, []string) error{
 		"tray":          cmdTray,
@@ -69,6 +69,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// shutdownContext is cancelled by Ctrl+C or SIGTERM (what launchd, systemd
+// and logout use to stop a process), so both shut down cleanly: the queue
+// and socket are closed and the log says why it stopped. A second signal
+// gets the default behavior, so a stuck shutdown can still be forced.
+func shutdownContext() context.Context {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-sigs
+		signal.Stop(sigs)
+		cancel(fmt.Errorf("received signal %q", s))
+	}()
+	return ctx
+}
+
+// stopReason is why ctx ended, for the log ("" if it hasn't).
+func stopReason(ctx context.Context) string {
+	if ctx.Err() == nil {
+		return ""
+	}
+	return context.Cause(ctx).Error()
 }
 
 func usage() {
@@ -129,7 +153,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	d.OpenSettings = ui.URL // `immich-courier settings --print` gives the URL
 	log.Info("immich-courier started", "version", version, "config", *cfgPath)
 	err = d.Run(ctx)
-	log.Info("immich-courier stopped")
+	log.Info("immich-courier stopped", "reason", stopReason(ctx))
 	return err
 }
 
