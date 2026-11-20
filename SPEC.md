@@ -287,5 +287,8 @@ So macOS releases ship `immich-courier.app` (zip):
   tray [--config …]`, so LaunchServices starts it as the app (own permission; no second copy if
   already running) and `AssociatedBundleIdentifiers` shows its name and icon in Login Items. A
   bare binary (built from source) is still started directly.
-- Not yet verified on a Mac when written: that the prompt appears and LAN uploads work at login,
-  and whether enabling Start at login still kills the running copy.
+- **Verified on Apple Silicon with v0.0.3-test (2026-11-20):** installed in /Applications, menu bar
+  icon and no Dock icon; macOS showed the Local Network prompt on the first server connection and
+  uploads worked after Allow; enabling Start at login no longer killed the running copy (the plist
+  uses `/usr/bin/open`); after logging out and in, the app started, was online and uploaded to the
+  LAN server.
