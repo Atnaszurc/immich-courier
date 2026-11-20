@@ -157,7 +157,7 @@ vendoring Immich's generated SDK or copying server code.
 
 - **One binary.** No arguments (or `tray`) runs the daemon with a tray icon when a desktop session
   is available; otherwise it prints help. `run` is the headless daemon for servers. All other
-  commands are CLI. The tray logs to `immich-courier.log` next to the config (rotated at 5 MB).
+  commands are CLI. The tray logs to `immich-courier.log` next to the config (at most 5 MB plus one old copy, `.log.1`; rotated while running, not only at startup).
 - Windows: built as a console app so the CLI behaves normally in terminals. An embedded manifest
   sets `consoleAllocationPolicy=detached` (Windows 11 24H2 / build 26100+), so starting it from
   Explorer or at login opens no console window; verified on build 26300. Older Windows ignores the

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,8 +17,6 @@ import (
 	"immich-courier/internal/tray"
 	"immich-courier/internal/webui"
 )
-
-const maxLogSize = 5 << 20
 
 // cmdTray runs the uploader with a tray icon. It's what runs when the
 // program is started without arguments (double-click, start at login).
@@ -97,24 +94,6 @@ func cmdTray(ctx context.Context, args []string) error {
 	<-runDone
 	return nil
 }
-
-// openLog appends to the log file, starting over (keeping one old copy)
-// once it passes maxLogSize.
-func openLog(p string) io.WriteCloser {
-	if st, err := os.Stat(p); err == nil && st.Size() > maxLogSize {
-		_ = os.Rename(p, p+".1")
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "can't open log:", err)
-		return nopCloser{os.Stderr}
-	}
-	return f
-}
-
-type nopCloser struct{ io.Writer }
-
-func (nopCloser) Close() error { return nil }
 
 // guiAvailable reports whether a tray can be shown, so that running the
 // program without arguments on a headless server prints help instead.
