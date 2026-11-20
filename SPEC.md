@@ -140,6 +140,24 @@ vendoring Immich's generated SDK or copying server code.
 - Per-folder post-upload action: keep / move to `uploaded/` / delete.
 - Sidecars (.xmp), Live Photos (HEIC+MOV), RAW+JPEG pairing.
 - Pause/resume, bandwidth limit, metered-network awareness.
+- Better dates for files with no EXIF date (from user feedback after the v0.1.0 release,
+  2026-11-20). Immich falls back to the `fileCreatedAt` we send, which is currently the
+  mtime. After phone migrations (iPhone→Android) and some copy tools, the mtime is the
+  transfer date instead. Both ideas are opt-in per folder, change only the date courier
+  sends on upload, never edit files or existing assets (still upload-only), and don't
+  apply when the file has an EXIF date (Immich uses that anyway):
+  - **Date from filename.** Parse common patterns (`IMG_20190612_143201`, `PXL_…`,
+    `IMG-20190612-WA0001`, `Screenshot_…`) and send that date. Local time with no zone,
+    so it's ambiguous like EXIF.
+  - **Oldest file timestamp.** If creation/birth time and mtime differ by more than
+    ~1 day, send the older one, in either direction. Created 2023 / modified 2026 →
+    2023 (it was edited later). Created 2026 / modified 2023 → 2023 (a copy tool gave it a
+    new creation time). The older timestamp is the best guess for when the photo was taken. Platform caveat: Windows `CreationTime` and
+    macOS `st_birthtime` are real creation times, but Linux `ctime` is the inode *change*
+    time, not creation. Linux needs `statx` btime, which some filesystems/NFS don't
+    provide. Ignore implausible values (epoch 0, before ~1990, in the future).
+  - Not a fix for assets already in Immich. Point those users to ExifTool or immich-go
+    (Google Takeout JSON sidecars).
 
 ## Implementation notes (2026-11-19)
 
