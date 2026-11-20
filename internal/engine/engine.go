@@ -24,6 +24,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"immich-courier/internal/config"
+	"immich-courier/internal/fsafe"
 	"immich-courier/internal/immich"
 	"immich-courier/internal/state"
 )
@@ -110,6 +111,10 @@ func New(cfg *config.Config, apiKeys map[string]string, store *state.Store, log 
 		c := immich.New(a.Server)
 		c.APIKey = key
 		e.accounts[a.Name] = newAccount(a, c, store, log, opt)
+	}
+	for _, f := range cfg.Folders {
+		a := e.accounts[f.Account]
+		a.folders = append(a.folders, f.Path)
 	}
 	return e, nil
 }
@@ -279,7 +284,7 @@ func (e *Engine) observe(path string, created bool) {
 	if !ok {
 		return
 	}
-	st, err := os.Stat(path)
+	st, err := os.Lstat(path) // never follow a symlink, to a folder or a file
 	if err != nil {
 		return // deleted or moved away; upload-only, so nothing to do
 	}
@@ -297,8 +302,8 @@ func (e *Engine) consider(f config.Folder, path string) {
 	if skipName(filepath.Base(path)) || !e.accounts[f.Account].accepts(path) {
 		return
 	}
-	st, err := os.Stat(path)
-	if err != nil || !st.Mode().IsRegular() {
+	st, ok := fsafe.IsRegular(path) // not a symlink, FIFO or device
+	if !ok {
 		return
 	}
 	if r, ok, _ := e.store.Get(path); ok && r.Account == f.Account &&
@@ -323,9 +328,9 @@ func (e *Engine) checkPending(ctx context.Context) {
 	var ready []job
 	e.mu.Lock()
 	for p, c := range e.pending {
-		st, err := os.Stat(p)
-		if err != nil {
-			delete(e.pending, p)
+		st, ok := fsafe.IsRegular(p)
+		if !ok {
+			delete(e.pending, p) // gone, or swapped for a link or special file
 			continue
 		}
 		if st.Size() != c.size || !st.ModTime().Equal(c.modTime) {
@@ -360,19 +365,25 @@ func (e *Engine) hashWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case j := <-e.hashQ:
-			e.hashOne(j)
+			e.hashOne(ctx, j)
 		}
 	}
 }
 
-func (e *Engine) hashOne(j job) {
-	sum, err := hashFile(j.path)
+func (e *Engine) hashOne(ctx context.Context, j job) {
+	sum, err := hashFile(ctx, j)
+	if errors.Is(err, errChanged) {
+		e.consider(j.folder, j.path) // look again; a non-regular file is dropped there
+		return
+	}
 	if err != nil {
-		e.log.Warn("can't read file", "path", j.path, "err", err)
+		if ctx.Err() == nil {
+			e.log.Warn("can't read file", "path", j.path, "err", err)
+		}
 		return
 	}
 	// If it changed while we read it, let the watcher pick it up again.
-	if st, err := os.Stat(j.path); err != nil || st.Size() != j.size || !st.ModTime().Equal(j.modTime) {
+	if st, ok := fsafe.IsRegular(j.path); !ok || st.Size() != j.size || !st.ModTime().Equal(j.modTime) {
 		e.consider(j.folder, j.path)
 		return
 	}
@@ -392,17 +403,41 @@ func (e *Engine) hashOne(j job) {
 	}
 }
 
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+// errChanged means the file is no longer the one that settled.
+var errChanged = errors.New("file changed")
+
+// hashFile hashes a settled file. It reads only a regular file that still
+// has the settled size and mtime, and stops when ctx is cancelled.
+func hashFile(ctx context.Context, j job) (string, error) {
+	f, st, err := fsafe.OpenRegular(j.path)
+	if errors.Is(err, fsafe.ErrNotRegular) || errors.Is(err, fs.ErrNotExist) {
+		return "", errChanged
+	}
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	if st.Size() != j.size || !st.ModTime().Equal(j.modTime) {
+		return "", errChanged
+	}
 	h := sha1.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.LimitReader(ctxReader{ctx, f}, j.size)); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ctxReader ends a long read between chunks once ctx is cancelled.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // skipName filters hidden files, OS clutter and in-progress downloads.

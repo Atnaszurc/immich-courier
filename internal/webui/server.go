@@ -1,18 +1,24 @@
 // Package webui is the settings page: a small web app served on 127.0.0.1
 // only while it's in use, opened in the user's browser from the tray or CLI.
 //
-// Security model (any website in the same browser could try to talk to a
-// local port):
+// Security model (any website in the same browser, and any program on this
+// machine, can try to talk to a local port):
 //   - Listens on 127.0.0.1 with a random port; shut down after 30 idle minutes.
-//   - Access needs a random session token. The tray/CLI opens /?t=TOKEN, which
-//     sets an HttpOnly, SameSite=Lax cookie and redirects to a clean URL. (Lax,
-//     not Strict: returning from the SSO provider is a cross-site redirect
-//     chain, and Strict cookies aren't sent on those.)
+//   - No cookies. Browsers send cookies to every port on a host, so a cookie
+//     would reach any other program listening on 127.0.0.1 (confirmed in
+//     Chrome, Edge and Firefox).
+//   - The tray/CLI opens /#t=TICKET. The ticket is random, works once and
+//     expires after two minutes, so one read from a process list or browser
+//     history is useless. It's in the fragment, so it is never sent in a
+//     request line, a Referer or a log.
+//   - The page trades the ticket for a session secret (POST /api/session),
+//     keeps it in sessionStorage (this tab only; survives the SSO round trip)
+//     and sends it in a header on every API call. A cross-site page can't
+//     send that header without a CORS preflight, which we never allow.
 //   - The Host header must be exactly 127.0.0.1:PORT (blocks DNS rebinding).
-//   - State-changing requests need a custom header (a cross-site page can't
-//     send one without a CORS preflight, which we never allow) and, if the
-//     browser sends Origin, it must be this server.
-//   - Strict CSP; the page loads nothing from the internet.
+//   - Changes need a matching Origin when the browser sends one.
+//   - Strict CSP; the page loads nothing from the internet. The page's own
+//     files (HTML, JS, CSS) are public and need no session.
 package webui
 
 import (
@@ -23,11 +29,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,8 +44,11 @@ import (
 var staticFS embed.FS
 
 const (
-	csrfHeader  = "X-Courier-Request"
-	idleTimeout = 30 * time.Minute
+	csrfHeader    = "X-Courier-Request"
+	sessionHeader = "X-Courier-Session"
+	idleTimeout   = 30 * time.Minute
+	ticketTTL     = 2 * time.Minute
+	maxSessions   = 32 // tabs; the oldest is dropped beyond this
 )
 
 // Server is the settings page. Create it once; URL starts it on demand.
@@ -47,13 +56,13 @@ type Server struct {
 	d   *daemon.Daemon
 	log *slog.Logger
 
-	mu      sync.Mutex
-	srv     *http.Server
-	base    string // http://127.0.0.1:PORT
-	host    string // 127.0.0.1:PORT
-	token   string
-	cookie  string // per port: browsers share cookies across ports
-	lastUse time.Time
+	mu       sync.Mutex
+	srv      *http.Server
+	base     string               // http://127.0.0.1:PORT
+	host     string               // 127.0.0.1:PORT
+	tickets  map[string]time.Time // one-time opening tickets -> expiry
+	sessions []string             // session secrets, oldest first
+	lastUse  time.Time
 
 	login loginState
 }
@@ -62,8 +71,8 @@ func New(d *daemon.Daemon) *Server {
 	return &Server{d: d, log: d.Log.With("component", "settings")}
 }
 
-// URL starts the server if it isn't running and returns a URL that logs the
-// browser in to it.
+// URL starts the server if it isn't running and returns a link that logs
+// one browser tab in to it. Each call makes a new one-time link.
 func (s *Server) URL() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,8 +81,22 @@ func (s *Server) URL() (string, error) {
 			return "", err
 		}
 	}
-	s.lastUse = time.Now()
-	return s.base + "/?t=" + s.token, nil
+	now := time.Now()
+	s.lastUse = now
+	for t, exp := range s.tickets {
+		if now.After(exp) {
+			delete(s.tickets, t)
+		}
+	}
+	t := randomToken()
+	s.tickets[t] = now.Add(ticketTTL)
+	return s.base + "/#t=" + t, nil
+}
+
+func randomToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // Close stops the server if it's running.
@@ -87,6 +110,7 @@ func (s *Server) stopLocked() {
 	if s.srv != nil {
 		s.srv.Close()
 		s.srv = nil
+		s.tickets, s.sessions = nil, nil
 		s.log.Info("settings page closed")
 	}
 }
@@ -96,13 +120,9 @@ func (s *Server) start() error {
 	if err != nil {
 		return err
 	}
-	b := make([]byte, 32)
-	rand.Read(b)
-	s.token = base64.RawURLEncoding.EncodeToString(b)
 	s.host = ln.Addr().String()
 	s.base = "http://" + s.host
-	_, port, _ := net.SplitHostPort(s.host)
-	s.cookie = "ic_session_" + port
+	s.tickets, s.sessions = map[string]time.Time{}, nil
 
 	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
 	s.srv = srv
@@ -134,44 +154,54 @@ func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(staticFS, "static")
 	files := http.FileServerFS(static)
-	mux.HandleFunc("GET /{$}", s.index(files))
+	mux.Handle("GET /{$}", files)
 	mux.Handle("GET /app.js", files)
 	mux.Handle("GET /app.css", files)
 	mux.Handle("GET /icon.svg", files)
+	mux.HandleFunc("POST /api/session", s.apiSession)
 	s.routes(mux)
 	return s.guard(mux)
 }
 
-// index logs the browser in when it carries the token, then serves the page.
-func (s *Server) index(files http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if t := r.URL.Query().Get("t"); t != "" {
-			if !s.tokenOK(t) {
-				http.Error(w, "This settings link has expired. Open Settings again from immich-courier.", http.StatusForbidden)
-				return
-			}
-			http.SetCookie(w, &http.Cookie{
-				Name: s.cookieName(), Value: t, Path: "/",
-				HttpOnly: true, SameSite: http.SameSiteLaxMode,
-			})
-			http.Redirect(w, r, "/", http.StatusSeeOther)
-			return
-		}
-		files.ServeHTTP(w, r)
+// apiSession trades a one-time ticket for a session secret.
+func (s *Server) apiSession(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Ticket string `json:"ticket"`
 	}
+	if err := readJSON(r, &in); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	s.mu.Lock()
+	exp, ok := s.tickets[in.Ticket]
+	delete(s.tickets, in.Ticket) // one use, valid or not
+	var sess string
+	if ok && in.Ticket != "" && time.Now().Before(exp) {
+		sess = randomToken()
+		s.sessions = append(s.sessions, sess)
+		if len(s.sessions) > maxSessions {
+			s.sessions = s.sessions[1:]
+		}
+	}
+	s.mu.Unlock()
+	if sess == "" {
+		fail(w, http.StatusUnauthorized, errors.New("this settings link has expired or was already used; open Settings again from immich-courier"))
+		return
+	}
+	writeJSON(w, 200, map[string]string{"session": sess})
 }
 
-func (s *Server) cookieName() string {
+func (s *Server) sessionOK(v string) bool {
+	if v == "" {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cookie
-}
-
-func (s *Server) tokenOK(t string) bool {
-	s.mu.Lock()
-	tok := s.token
-	s.mu.Unlock()
-	return tok != "" && subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1
+	ok := 0
+	for _, sess := range s.sessions {
+		ok |= subtle.ConstantTimeCompare([]byte(v), []byte(sess))
+	}
+	return ok == 1
 }
 
 // guard applies the checks described in the package comment to every request.
@@ -193,16 +223,6 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		isLogin := r.Method == http.MethodGet && r.URL.Path == "/" && r.URL.Query().Get("t") != ""
-		if !isLogin {
-			c, err := r.Cookie(s.cookieName())
-			if err != nil || !s.tokenOK(c.Value) {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusUnauthorized)
-				io.WriteString(w, `<!doctype html><meta charset="utf-8"><title>immich-courier</title><p>Open <b>Settings</b> from the immich-courier tray icon to manage it.</p>`)
-				return
-			}
-		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if r.Header.Get(csrfHeader) != "1" {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -213,6 +233,11 @@ func (s *Server) guard(next http.Handler) http.Handler {
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		}
+		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+		if isAPI && r.URL.Path != "/api/session" && !s.sessionOK(r.Header.Get(sessionHeader)) {
+			fail(w, http.StatusUnauthorized, errors.New("not logged in"))
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

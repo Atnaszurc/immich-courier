@@ -21,8 +21,34 @@ function h(tag, props, ...children) {
   return el;
 }
 
+// ---- session ------------------------------------------------------------
+// The tray opens /#t=TICKET. The ticket works once; the page trades it for a
+// session secret kept in this tab's sessionStorage (it survives the SSO
+// round trip) and sent as a header. No cookies: browsers would send those to
+// every program listening on 127.0.0.1.
+
+const SESSION_KEY = "ic-session";
+let session = null;
+try { session = sessionStorage.getItem(SESSION_KEY); } catch { /* storage blocked */ }
+
+async function startSession() {
+  const m = location.hash.match(/^#t=([A-Za-z0-9_-]+)$/);
+  if (!m) return;
+  history.replaceState(null, "", "/"); // don't leave the ticket in history
+  try {
+    const res = await fetch("/api/session", {
+      method: "POST",
+      headers: { "X-Courier-Request": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket: m[1] }),
+    });
+    if (!res.ok) return; // refresh() shows the "open Settings again" banner
+    session = (await res.json()).session;
+    try { sessionStorage.setItem(SESSION_KEY, session); } catch { /* this tab only, until reload */ }
+  } catch { /* refresh() reports it */ }
+}
+
 async function api(method, path, body) {
-  const opts = { method, headers: {}, credentials: "same-origin" };
+  const opts = { method, headers: { "X-Courier-Session": session || "" } };
   if (method !== "GET") {
     opts.headers["X-Courier-Request"] = "1";
     opts.headers["Content-Type"] = "application/json";
@@ -345,7 +371,13 @@ $("in-server").addEventListener("keydown", (e) => {
 });
 
 function loginBody(extra) {
-  return Object.assign({ name: $("in-name").value.trim(), server: probed.server }, extra);
+  const name = $("in-name").value.trim();
+  // Adding (not "Log in again"): an existing name would mean taking over that
+  // account's folders. The server refuses a different server or user too.
+  if (!$("in-name").readOnly && state && state.accounts.some((a) => a.name.toLowerCase() === name.toLowerCase())) {
+    throw new Error(`There is already an account named "${name}". Choose another name, or use Log in again on that account.`);
+  }
+  return Object.assign({ name, server: probed.server }, extra);
 }
 
 async function loggedIn(res) {
@@ -488,6 +520,6 @@ $("btn-watch").addEventListener("click", async (e) => {
 
 // ---- start ----------------------------------------------------------------
 
-refresh().then(finishOIDC);
+startSession().then(refresh).then(finishOIDC);
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 3000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });

@@ -24,10 +24,13 @@ import (
 // which case every request gets a 502 like a reverse proxy in front of a
 // stopped server.
 type fakeImmich struct {
-	mu      sync.Mutex
-	assets  map[string]string // checksum -> filename
-	uploads atomic.Int32
-	offline atomic.Bool
+	mu       sync.Mutex
+	assets   map[string]string // checksum -> filename
+	uploads  atomic.Int32
+	offline  atomic.Bool
+	media    string // media-types response; empty means .jpg and .mp4
+	failName string // uploads of this file name get a 500
+	failures atomic.Int32
 }
 
 func (f *fakeImmich) handler() http.Handler {
@@ -36,6 +39,10 @@ func (f *fakeImmich) handler() http.Handler {
 		w.Write([]byte(`{"res":"pong"}`))
 	})
 	mux.HandleFunc("GET /api/server/media-types", func(w http.ResponseWriter, r *http.Request) {
+		if f.media != "" {
+			w.Write([]byte(f.media))
+			return
+		}
 		w.Write([]byte(`{"image":[".jpg"],"video":[".mp4"],"sidecar":[".xmp"]}`))
 	})
 	mux.HandleFunc("POST /api/assets/bulk-upload-check", func(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +70,11 @@ func (f *fakeImmich) handler() http.Handler {
 		file, hdr, err := r.FormFile("assetData")
 		if err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+		if f.failName != "" && hdr.Filename == f.failName {
+			f.failures.Add(1)
+			http.Error(w, `{"message":"boom"}`, 500)
 			return
 		}
 		h := sha1.New()
@@ -136,10 +148,17 @@ type harness struct {
 
 func start(t *testing.T, fake *fakeImmich, srvURL, dir, dbPath string) *harness {
 	t.Helper()
-	cfg := &config.Config{
-		Accounts: []config.Account{{Name: "a", Server: srvURL}},
-		Folders:  []config.Folder{{Path: dir, Account: "a"}},
+	return startWith(t, fake, srvURL, dbPath, dir)
+}
+
+// startWith runs an engine with one account "a" watching all dirs.
+func startWith(t *testing.T, fake *fakeImmich, srvURL, dbPath string, dirs ...string) *harness {
+	t.Helper()
+	cfg := &config.Config{Accounts: []config.Account{{Name: "a", Server: srvURL}}}
+	for _, d := range dirs {
+		cfg.Folders = append(cfg.Folders, config.Folder{Path: d, Account: "a"})
 	}
+	dir := dirs[0]
 	store, err := state.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)

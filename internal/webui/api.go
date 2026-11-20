@@ -79,7 +79,7 @@ func (s *Server) apiState(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Home, _ = os.UserHomeDir()
 	for _, a := range cfg.Accounts {
-		av := accountView{Name: a.Name, Server: a.Server, HasKey: accounts.HasKey(a.Name)}
+		av := accountView{Name: a.Name, Server: a.Server, HasKey: accounts.HasKey(s.d.CfgPath, a)}
 		for _, f := range cfg.Folders {
 			if f.Account == a.Name {
 				av.Folders++

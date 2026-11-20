@@ -5,11 +5,15 @@ package accounts
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -19,7 +23,7 @@ import (
 	"immich-courier/internal/immich"
 )
 
-// KeyringService is the OS keychain service name; the account name is the user.
+// KeyringService is the OS keychain service name; see KeyName for the user.
 const KeyringService = "immich-courier"
 
 // ServerInfo is what a server supports, for choosing a login method.
@@ -92,8 +96,43 @@ func KeyFromSession(ctx context.Context, server string, s auth.Session) (secret 
 	return key.Secret, err, nil
 }
 
-// Save verifies the API key, stores it in the keychain and adds or updates
-// the account in the config. It returns the Immich user the key belongs to.
+// KeyName is the keychain entry for an account: its name plus a short hash
+// of the config file and the server. Two config files that both have a
+// "home" account, or an account that later points at another server, never
+// share a key, so a key is only ever sent to the server it was made for.
+func KeyName(cfgPath, name, server string) string {
+	abs, err := filepath.Abs(cfgPath)
+	if err != nil {
+		abs = cfgPath
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		abs = strings.ToLower(abs) // same file, however it was typed
+	}
+	sum := sha256.Sum256([]byte(abs + "\n" + server))
+	return name + "@" + hex.EncodeToString(sum[:6])
+}
+
+// LoadKey returns the stored API key for an account in this config.
+func LoadKey(cfgPath string, a config.Account) (string, error) {
+	kn := KeyName(cfgPath, a.Name, a.Server)
+	k, err := keyring.Get(KeyringService, kn)
+	if errors.Is(err, keyring.ErrNotFound) {
+		// Early builds stored keys under the bare account name; move it.
+		if old, lerr := keyring.Get(KeyringService, a.Name); lerr == nil {
+			if keyring.Set(KeyringService, kn, old) == nil {
+				_ = keyring.Delete(KeyringService, a.Name)
+			}
+			return old, nil
+		}
+	}
+	return k, err
+}
+
+// Save verifies the API key, stores it in the keychain and adds the
+// account to the config, or re-authenticates an existing one. An existing
+// account keeps its server and Immich user: logging in to another server
+// or as another user under the same name is refused, so its folders never
+// silently start uploading somewhere else. It returns the key's user.
 func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.User, error) {
 	if err := ValidName(name); err != nil {
 		return immich.User{}, err
@@ -106,6 +145,17 @@ func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.Use
 	if secret == "" || strings.IndexFunc(secret, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
 		return immich.User{}, errors.New("that doesn't look like an API key")
 	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return immich.User{}, err
+	}
+	old, exists := cfg.AccountFold(name)
+	if exists && old.Name != name {
+		return immich.User{}, fmt.Errorf("there is already an account named %q; choose another name", old.Name)
+	}
+	if exists && old.Server != server {
+		return immich.User{}, fmt.Errorf("account %q uploads to %s. To upload to %s, add it as a new account with another name", name, old.Server, server)
+	}
 	c := immich.New(server)
 	c.APIKey = secret
 	u, err := c.Me(ctx)
@@ -116,24 +166,43 @@ func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.Use
 		}
 		return immich.User{}, fmt.Errorf("couldn't check the API key: %w", err)
 	}
-	if err := keyring.Set(KeyringService, name, secret); err != nil {
+	if exists && old.UserID != "" && old.UserID != u.ID {
+		return immich.User{}, fmt.Errorf("that login is %s <%s>, but account %q uploads as another Immich user. Log in as that user, or add a new account", u.Name, u.Email, name)
+	}
+	// Keychain last, and undone if the config can't be saved, so a key
+	// never sits next to a config that doesn't match it.
+	kn := KeyName(cfgPath, name, server)
+	prev, prevErr := keyring.Get(KeyringService, kn)
+	if err := keyring.Set(KeyringService, kn, secret); err != nil {
 		return immich.User{}, fmt.Errorf("couldn't store the key in the OS keychain: %w", err)
 	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return immich.User{}, err
-	}
-	cfg.SetAccount(config.Account{Name: name, Server: server})
+	cfg.SetAccount(config.Account{Name: name, Server: server, UserID: u.ID})
 	if err := cfg.Save(cfgPath); err != nil {
+		if prevErr == nil {
+			_ = keyring.Set(KeyringService, kn, prev)
+		} else {
+			_ = keyring.Delete(KeyringService, kn)
+		}
 		return immich.User{}, err
 	}
 	return u, nil
 }
 
 // HasKey reports whether the keychain holds a key for the account.
-func HasKey(name string) bool {
-	_, err := keyring.Get(KeyringService, name)
+func HasKey(cfgPath string, a config.Account) bool {
+	_, err := LoadKey(cfgPath, a)
 	return err == nil
+}
+
+// DeleteKey removes an account's key from the keychain (also an early
+// build's entry under the bare name). A missing key is not an error.
+func DeleteKey(cfgPath string, a config.Account) error {
+	err := keyring.Delete(KeyringService, KeyName(cfgPath, a.Name, a.Server))
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return err
+	}
+	_ = keyring.Delete(KeyringService, a.Name)
+	return nil
 }
 
 // Remove deletes an account from the config and its key from the keychain.
@@ -156,22 +225,19 @@ func Remove(cfgPath, name string, withFolders bool) error {
 		}
 	}
 	cfg.Folders = kept
-	found := false
+	var removed *config.Account
 	for i, a := range cfg.Accounts {
 		if a.Name == name {
 			cfg.Accounts = append(cfg.Accounts[:i], cfg.Accounts[i+1:]...)
-			found = true
+			removed = &a
 			break
 		}
 	}
-	if !found {
+	if removed == nil {
 		return fmt.Errorf("no account named %q", name)
 	}
 	if err := cfg.Save(cfgPath); err != nil {
 		return err
 	}
-	if err := keyring.Delete(KeyringService, name); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return err
-	}
-	return nil
+	return DeleteKey(cfgPath, *removed)
 }

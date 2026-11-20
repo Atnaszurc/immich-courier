@@ -16,6 +16,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"immich-courier/internal/accounts"
 	"immich-courier/internal/daemon"
 )
 
@@ -29,19 +30,23 @@ func fakeImmich() *httptest.Server {
 		w.Write([]byte(`{"oauth":false,"passwordLogin":true}`))
 	})
 	mux.HandleFunc("GET /api/users/me", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "good-key" {
+		switch r.Header.Get("x-api-key") {
+		case "good-key":
+			w.Write([]byte(`{"id":"u1","email":"pri@example.com","name":"Pri"}`))
+		case "other-user-key":
+			w.Write([]byte(`{"id":"u2","email":"fred@example.com","name":"Fred"}`))
+		default:
 			http.Error(w, `{"message":"Invalid API key"}`, 401)
-			return
 		}
-		w.Write([]byte(`{"id":"u1","email":"pri@example.com","name":"Pri"}`))
 	})
 	return httptest.NewServer(mux)
 }
 
 type client struct {
-	t    *testing.T
-	hc   *http.Client
-	base string
+	t       *testing.T
+	hc      *http.Client
+	base    string
+	session string
 }
 
 func (c *client) do(method, path string, body any, csrf bool) (*http.Response, map[string]any) {
@@ -54,6 +59,9 @@ func (c *client) do(method, path string, body any, csrf bool) (*http.Response, m
 	req, _ := http.NewRequest(method, c.base+path, rd)
 	if csrf {
 		req.Header.Set("X-Courier-Request", "1")
+	}
+	if c.session != "" {
+		req.Header.Set(sessionHeader, c.session)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -90,29 +98,68 @@ func setup(t *testing.T) (*Server, *client, string) {
 	return s, &client{t: t, hc: hc, base: pu.Scheme + "://" + pu.Host}, u
 }
 
-func TestGuard(t *testing.T) {
-	_, c, loginURL := setup(t)
+// login trades the ticket in a settings link for a session, like app.js.
+func (c *client) login(link string) (*http.Response, map[string]any) {
+	c.t.Helper()
+	ticket, _ := strings.CutPrefix(link[strings.Index(link, "#"):], "#t=")
+	resp, out := c.do("POST", "/api/session", map[string]string{"ticket": ticket}, true)
+	if s, ok := out["session"].(string); ok {
+		c.session = s
+	}
+	return resp, out
+}
 
-	// No cookie: refused.
+func TestGuard(t *testing.T) {
+	s, c, loginURL := setup(t)
+
+	// The link carries the ticket in the fragment, never in the query.
+	if !strings.Contains(loginURL, "/#t=") || strings.Contains(loginURL, "?") {
+		t.Fatalf("settings link %q", loginURL)
+	}
+	// The page itself is public; the API isn't.
+	if resp, _ := c.do("GET", "/", nil, false); resp.StatusCode != 200 {
+		t.Fatalf("page: %d", resp.StatusCode)
+	}
 	if resp, _ := c.do("GET", "/api/state", nil, false); resp.StatusCode != 401 {
-		t.Fatalf("no cookie: %d", resp.StatusCode)
+		t.Fatalf("no session: %d", resp.StatusCode)
 	}
-	// Wrong token: refused.
-	if resp, _ := c.do("GET", "/?t=nope", nil, false); resp.StatusCode != 403 {
-		t.Fatalf("wrong token: %d", resp.StatusCode)
+	// Wrong ticket: refused.
+	if resp, _ := c.login("x#t=nope"); resp.StatusCode != 401 {
+		t.Fatalf("wrong ticket: %d", resp.StatusCode)
 	}
-	// Right token: cookie set, redirected to a clean URL.
-	resp, err := c.hc.Get(loginURL)
-	if err != nil || resp.StatusCode != 200 || resp.Request.URL.RawQuery != "" {
-		t.Fatalf("login: %v %v %v", err, resp.StatusCode, resp.Request.URL)
+	// Right ticket: a session, and no cookie (browsers send cookies to every
+	// port on 127.0.0.1).
+	resp, out := c.login(loginURL)
+	if resp.StatusCode != 200 || c.session == "" {
+		t.Fatalf("login: %d %v", resp.StatusCode, out)
 	}
-	resp.Body.Close()
-	if resp, _ := c.do("GET", "/api/state", nil, false); resp.StatusCode != 200 {
-		t.Fatalf("with cookie: %d", resp.StatusCode)
+	if sc := resp.Header.Values("Set-Cookie"); len(sc) > 0 {
+		t.Fatalf("settings page set a cookie: %v", sc)
+	}
+	good := c.session
+	// The ticket works once.
+	c.session = ""
+	if resp, _ := c.login(loginURL); resp.StatusCode != 401 {
+		t.Fatalf("ticket reused: %d", resp.StatusCode)
+	}
+	// Each link is new; old one-time links from earlier calls stay single-use.
+	if l2, _ := s.URL(); l2 == loginURL {
+		t.Fatal("URL returned the same ticket twice")
+	}
+	c.session = good
+	resp, _ = c.do("GET", "/api/state", nil, false)
+	if resp.StatusCode != 200 {
+		t.Fatalf("with session: %d", resp.StatusCode)
 	}
 	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
 		t.Fatalf("missing CSP: %q", csp)
 	}
+	// Wrong session: refused.
+	c.session = "nope"
+	if resp, _ := c.do("GET", "/api/state", nil, false); resp.StatusCode != 401 {
+		t.Fatalf("wrong session: %d", resp.StatusCode)
+	}
+	c.session = good
 
 	// POST without the custom header: refused (cross-site form/fetch can't add it).
 	if resp, _ := c.do("POST", "/api/pause", map[string]bool{"paused": true}, false); resp.StatusCode != 403 {
@@ -121,17 +168,19 @@ func TestGuard(t *testing.T) {
 	// POST from another origin: refused.
 	req, _ := http.NewRequest("POST", c.base+"/api/pause", strings.NewReader(`{"paused":true}`))
 	req.Header.Set("X-Courier-Request", "1")
+	req.Header.Set(sessionHeader, good)
 	req.Header.Set("Origin", "https://evil.example")
 	if resp, err := c.hc.Do(req); err != nil || resp.StatusCode != 403 {
 		t.Fatalf("foreign origin: %v %v", err, resp.StatusCode)
 	}
 	// DNS rebinding: right port, wrong Host header.
 	req, _ = http.NewRequest("GET", c.base+"/api/state", nil)
+	req.Header.Set(sessionHeader, good)
 	req.Host = "evil.example:" + strings.Split(c.base, ":")[2]
 	if resp, err := c.hc.Do(req); err != nil || resp.StatusCode != 403 {
 		t.Fatalf("bad host: %v %v", err, resp.StatusCode)
 	}
-	// Same-origin POST with header: allowed.
+	// Same-origin POST with header and session: allowed.
 	if resp, _ := c.do("POST", "/api/pause", map[string]bool{"paused": false}, true); resp.StatusCode != 200 {
 		t.Fatalf("good POST: %d", resp.StatusCode)
 	}
@@ -140,11 +189,9 @@ func TestGuard(t *testing.T) {
 func TestSetupFlow(t *testing.T) {
 	im := fakeImmich()
 	defer im.Close()
-	_, c, loginURL := setup(t)
-	if resp, err := c.hc.Get(loginURL); err != nil {
-		t.Fatal(err)
-	} else {
-		resp.Body.Close()
+	s, c, loginURL := setup(t)
+	if resp, out := c.login(loginURL); resp.StatusCode != 200 {
+		t.Fatalf("login: %v", out)
 	}
 
 	// Probe normalizes the address and reports login methods.
@@ -163,8 +210,31 @@ func TestSetupFlow(t *testing.T) {
 	if resp.StatusCode != 200 || out["email"] != "pri@example.com" {
 		t.Fatalf("good key: %d %v", resp.StatusCode, out)
 	}
-	if k, _ := keyring.Get("immich-courier", "pri"); k != "good-key" {
+	keyName := accounts.KeyName(s.d.CfgPath, "pri", im.URL)
+	if k, _ := keyring.Get(accounts.KeyringService, keyName); k != "good-key" {
 		t.Fatalf("keychain has %q", k)
+	}
+
+	// Logging in again under an existing name can't move the account to
+	// another server or Immich user, or create a case-variant twin.
+	im2 := fakeImmich()
+	defer im2.Close()
+	for _, tc := range []struct{ name, server, key, want string }{
+		{"pri", im2.URL, "good-key", "uploads to"},
+		{"pri", im.URL, "other-user-key", "another Immich user"},
+		{"PRI", im.URL, "good-key", "already an account"},
+	} {
+		resp, out = c.do("POST", "/api/login/apikey", map[string]string{"name": tc.name, "server": tc.server, "apiKey": tc.key}, true)
+		if resp.StatusCode != 400 || !strings.Contains(out["error"].(string), tc.want) {
+			t.Fatalf("login %s@%s with %s: %d %v", tc.name, tc.server, tc.key, resp.StatusCode, out)
+		}
+	}
+	if k, _ := keyring.Get(accounts.KeyringService, keyName); k != "good-key" {
+		t.Fatalf("refused login changed the key to %q", k)
+	}
+	// The same user on the same server can log in again.
+	if resp, out = c.do("POST", "/api/login/apikey", map[string]string{"name": "pri", "server": im.URL, "apiKey": "good-key"}, true); resp.StatusCode != 200 {
+		t.Fatalf("re-login: %d %v", resp.StatusCode, out)
 	}
 
 	// Browse, create a folder, watch it.
@@ -212,7 +282,7 @@ func TestSetupFlow(t *testing.T) {
 	if resp, out = c.do("POST", "/api/accounts/remove", map[string]string{"name": "pri"}, true); resp.StatusCode != 200 {
 		t.Fatalf("remove account: %v", out)
 	}
-	if _, err := keyring.Get("immich-courier", "pri"); err == nil {
+	if _, err := keyring.Get(accounts.KeyringService, keyName); err == nil {
 		t.Fatal("key left in keychain")
 	}
 
@@ -231,10 +301,8 @@ func TestSetupFlow(t *testing.T) {
 
 func TestTimingSettings(t *testing.T) {
 	_, c, loginURL := setup(t)
-	if resp, err := c.hc.Get(loginURL); err != nil {
-		t.Fatal(err)
-	} else {
-		resp.Body.Close()
+	if resp, out := c.login(loginURL); resp.StatusCode != 200 {
+		t.Fatalf("login: %v", out)
 	}
 	settings := func() map[string]any {
 		_, out := c.do("GET", "/api/state", nil, false)

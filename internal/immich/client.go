@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,8 +27,23 @@ type Client struct {
 func New(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		HTTP:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameOrigin},
 	}
+}
+
+// sameOrigin refuses redirects that leave the server's scheme and host. The
+// API key is a custom header, which net/http forwards on every redirect, so
+// a redirect to another host (an SSO gateway, a misconfigured proxy) or to
+// plain http would hand the key over.
+func sameOrigin(req *http.Request, via []*http.Request) error {
+	orig := via[0].URL
+	if req.URL.Scheme != orig.Scheme || req.URL.Host != orig.Host {
+		return fmt.Errorf("immich: the server redirected to %s://%s; not following it with your credentials (check the server address)", req.URL.Scheme, req.URL.Host)
+	}
+	if len(via) >= 10 {
+		return errors.New("immich: too many redirects")
+	}
+	return nil
 }
 
 // APIError is a non-2xx response from Immich.

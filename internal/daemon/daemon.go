@@ -18,8 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zalando/go-keyring"
-
 	"immich-courier/internal/accounts"
 	"immich-courier/internal/config"
 	"immich-courier/internal/engine"
@@ -28,17 +26,34 @@ import (
 
 const KeyringService = accounts.KeyringService
 
-// Paths derived from the config file location.
-func StatePath(cfgPath string) string { return filepath.Join(filepath.Dir(cfgPath), "state.db") }
+// derived names a file that belongs to one config file, next to it. The
+// default config.toml keeps the plain names; any other config gets its own
+// (work.toml → work.toml.state.db), so two configs in one folder never
+// share a queue, a socket or a log.
+func derived(cfgPath, plain, suffix string) string {
+	dir, base := filepath.Split(cfgPath)
+	if base == "config.toml" {
+		return filepath.Join(dir, plain)
+	}
+	return filepath.Join(dir, base+suffix)
+}
+
+// StatePath is the state database for a config file.
+func StatePath(cfgPath string) string { return derived(cfgPath, "state.db", ".state.db") }
+
+// LogPath is the tray's log file for a config file.
+func LogPath(cfgPath string) string {
+	return derived(cfgPath, "immich-courier.log", ".log")
+}
 
 // maxSocketPath stays under the smallest sun_path limit (104 bytes on macOS).
 const maxSocketPath = 100
 
-// SocketPath is courier.sock next to the config. If that path is too long
-// for a Unix socket, it is a short name derived from the config path inside
-// a private per-user directory instead.
+// SocketPath is courier.sock next to the config (see derived). If that path
+// is too long for a Unix socket, it is a short name derived from the config
+// path inside a private per-user directory instead.
 func SocketPath(cfgPath string) string {
-	p := filepath.Join(filepath.Dir(cfgPath), "courier.sock")
+	p := derived(cfgPath, "courier.sock", ".sock")
 	if len(p) <= maxSocketPath {
 		return p
 	}
@@ -60,10 +75,6 @@ func shortSocketDir() string {
 		name += "-" + filepath.Base(u.Username) // /tmp is shared on Linux/macOS
 	}
 	return filepath.Join(os.TempDir(), name)
-}
-
-func LogPath(cfgPath string) string {
-	return filepath.Join(filepath.Dir(cfgPath), "immich-courier.log")
 }
 
 // Status is what the daemon reports over IPC and to the tray.
@@ -208,7 +219,11 @@ func (d *Daemon) buildEngine() (*engine.Engine, error) {
 		if _, ok := keys[f.Account]; ok {
 			continue
 		}
-		k, err := keyring.Get(KeyringService, f.Account)
+		a, ok := cfg.Account(f.Account)
+		if !ok {
+			return nil, fmt.Errorf("folder %s uses unknown account %q", f.Path, f.Account)
+		}
+		k, err := accounts.LoadKey(d.CfgPath, a)
 		if err != nil {
 			return nil, fmt.Errorf("no API key for account %q; log in again", f.Account)
 		}

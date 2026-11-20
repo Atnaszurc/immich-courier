@@ -1,5 +1,5 @@
 // Package config holds the user's accounts and watched folders. Secrets are
-// never stored here; API keys live in the OS keychain, keyed by account name.
+// never stored here; API keys live in the OS keychain (see accounts.KeyName).
 package config
 
 import (
@@ -49,6 +49,9 @@ func (s Settings) validate() error {
 type Account struct {
 	Name   string `toml:"name" json:"name"`
 	Server string `toml:"server" json:"server"`
+	// UserID is the Immich user the key belongs to. A later login under
+	// this name must be the same user. Empty in configs from early builds.
+	UserID string `toml:"user_id,omitempty" json:"userId,omitempty"`
 }
 
 type Folder struct {
@@ -146,6 +149,17 @@ func (c *Config) Account(name string) (Account, bool) {
 	return Account{}, false
 }
 
+// AccountFold finds an account by name, ignoring case. Names that differ
+// only in case aren't allowed: some keychains (Windows) ignore case.
+func (c *Config) AccountFold(name string) (Account, bool) {
+	for _, a := range c.Accounts {
+		if strings.EqualFold(a.Name, name) {
+			return a, true
+		}
+	}
+	return Account{}, false
+}
+
 // SetAccount adds or updates an account.
 func (c *Config) SetAccount(a Account) {
 	for i := range c.Accounts {
@@ -204,13 +218,17 @@ func (c *Config) Validate() error {
 		if a.Name == "" || a.Server == "" {
 			return errors.New("every account needs a name and a server")
 		}
-		if names[a.Name] {
-			return fmt.Errorf("account %q is defined twice", a.Name)
+		if names[strings.ToLower(a.Name)] {
+			return fmt.Errorf("account %q is defined twice (names are not case-sensitive)", a.Name)
 		}
-		names[a.Name] = true
+		names[strings.ToLower(a.Name)] = true
+	}
+	exact := map[string]bool{}
+	for _, a := range c.Accounts {
+		exact[a.Name] = true
 	}
 	for i, f := range c.Folders {
-		if !names[f.Account] {
+		if !exact[f.Account] {
 			return fmt.Errorf("folder %s uses unknown account %q (run login first)", f.Path, f.Account)
 		}
 		if !filepath.IsAbs(f.Path) {

@@ -191,8 +191,24 @@ func TestLongConfigPathGetsShortSocket(t *testing.T) {
 	if p != SocketPath(long) || p == SocketPath(long+"x") {
 		t.Fatal("socket path must be stable per config and differ between configs")
 	}
-	short := filepath.Join(t.TempDir(), "c.toml")
-	if len(filepath.Join(filepath.Dir(short), "courier.sock")) <= maxSocketPath && SocketPath(short) != filepath.Join(filepath.Dir(short), "courier.sock") {
+	dir := t.TempDir()
+	short := filepath.Join(dir, "c.toml")
+	if len(filepath.Join(dir, "c.toml.sock")) <= maxSocketPath && SocketPath(short) != filepath.Join(dir, "c.toml.sock") {
 		t.Fatal("short config paths should keep the socket next to the config")
+	}
+}
+
+// Two config files in one folder must not share a queue, socket or log;
+// the default config keeps the original names.
+func TestDerivedPathsPerConfig(t *testing.T) {
+	dir := t.TempDir()
+	def, work := filepath.Join(dir, "config.toml"), filepath.Join(dir, "work.toml")
+	if StatePath(def) != filepath.Join(dir, "state.db") || LogPath(def) != filepath.Join(dir, "immich-courier.log") {
+		t.Fatalf("default config paths changed: %s %s", StatePath(def), LogPath(def))
+	}
+	for _, f := range []func(string) string{StatePath, LogPath, SocketPath} {
+		if f(def) == f(work) {
+			t.Fatalf("configs share %s", f(def))
+		}
 	}
 }

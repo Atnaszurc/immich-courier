@@ -142,8 +142,45 @@ func TestOIDCLoginRejectsWrongState(t *testing.T) {
 		}()
 		return nil
 	}
-	_, err := OIDCLogin(context.Background(), immich.New(srv.URL), OIDCOptions{Port: 47998, OpenBrowser: browser, Timeout: 5 * time.Second})
+	_, err := OIDCLogin(context.Background(), immich.New(srv.URL), OIDCOptions{Port: 47998, OpenBrowser: browser, Timeout: time.Second})
 	if err == nil {
-		t.Fatal("expected state mismatch error")
+		t.Fatal("a callback with a forged state was accepted")
+	}
+}
+
+// A request to the callback port that isn't the answer to this login (no
+// or wrong state) must not end the login or put its text in the result.
+func TestOIDCCallbackIgnoresUnboundRequests(t *testing.T) {
+	f := &fakeImmich{sessionTokens: map[string]bool{}}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+
+	browser := func(u string) error {
+		go func() {
+			for _, q := range []string{"?error=access_denied&error_description=call+evil.example", "?state=nope&code=x"} {
+				if resp, err := http.Get("http://127.0.0.1:47997/callback" + q); err == nil {
+					resp.Body.Close()
+				}
+			}
+			if resp, err := http.Get(u); err == nil { // the real provider round trip
+				resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+	s, err := OIDCLogin(context.Background(), immich.New(srv.URL), OIDCOptions{Port: 47997, OpenBrowser: browser, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("login ended by an unbound callback: %v", err)
+	}
+	if s.Token == "" {
+		t.Fatal("no session")
+	}
+}
+
+func TestOpenBrowserOnlyWebURLs(t *testing.T) {
+	for _, u := range []string{`C:\Windows\System32\calc.exe`, "file:///etc/passwd", "ms-settings:", "javascript:alert(1)", "https://"} {
+		if err := OpenBrowser(u); err == nil {
+			t.Errorf("OpenBrowser(%q) was allowed", u)
+		}
 	}
 }

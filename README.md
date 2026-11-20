@@ -52,6 +52,11 @@ scripted bulk uploads, the official Immich CLI is a good fit.
 go build -o bin/ ./cmd/immich-courier
 ```
 
+## Security
+
+How the app handles your API key and files, the November 2026 security audit and its
+results, and how to report a problem: see [SECURITY.md](SECURITY.md).
+
 ## No promises
 
 This is a personal project, shared in case it's useful to others. It is

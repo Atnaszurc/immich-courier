@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 
-	"github.com/zalando/go-keyring"
 	"golang.org/x/term"
 
 	"immich-courier/internal/accounts"
@@ -182,7 +182,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 		fmt.Println("Uploads are PAUSED (resume with: immich-courier resume)")
 	}
 	if s.Problem != "" {
-		fmt.Println("Not uploading:", s.Problem)
+		fmt.Println("Not uploading:", safe(s.Problem))
 	}
 	for _, a := range s.Accounts {
 		conn := "online"
@@ -199,18 +199,29 @@ func cmdStatus(ctx context.Context, args []string) error {
 		}
 		fmt.Println()
 		if a.Uploading != "" {
-			fmt.Println("  uploading:", a.Uploading)
+			fmt.Println("  uploading:", safe(a.Uploading))
 		}
 		if a.LastError != "" {
-			fmt.Println("  last error:", a.LastError)
+			fmt.Println("  last error:", safe(a.LastError))
 		}
 		for _, f := range s.Folders {
 			if f.Account == a.Name {
-				fmt.Println("  watching", f.Path)
+				fmt.Println("  watching", safe(f.Path))
 			}
 		}
 	}
 	return nil
+}
+
+// safe escapes control characters (terminal escape sequences, newlines)
+// in text that comes from file names or servers, so it can't rewrite
+// the terminal or fake extra status lines.
+func safe(s string) string {
+	if strings.IndexFunc(s, func(r rune) bool { return !strconv.IsGraphic(r) }) < 0 {
+		return s
+	}
+	q := strconv.QuoteToGraphic(s)
+	return q[1 : len(q)-1]
 }
 
 func cmdAddFolder(ctx context.Context, args []string) error {
@@ -287,7 +298,7 @@ func cmdList(ctx context.Context, args []string) error {
 	}
 	for _, a := range cfg.Accounts {
 		key := "API key in keychain"
-		if _, err := keyring.Get(daemon.KeyringService, a.Name); err != nil {
+		if !accounts.HasKey(*cfgPath, a) {
 			key = "NO API KEY (run login)"
 		}
 		fmt.Printf("\nAccount %q  %s  [%s]\n", a.Name, a.Server, key)
@@ -422,19 +433,28 @@ func cmdSettings(ctx context.Context, args []string) error {
 			return nil
 		}
 	}
-	fmt.Println("Settings page (valid while immich-courier runs; closes after 30 idle minutes):")
+	fmt.Println("Settings page (this link works once, within 2 minutes; run the command again for a new one):")
 	fmt.Println("  " + u)
 	return nil
 }
 
 func cmdLogout(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("logout", flag.ExitOnError)
+	cfgPath := configFlag(fs)
 	account := fs.String("account", "", "account profile name (required)")
 	fs.Parse(args)
 	if *account == "" {
 		return errors.New("--account is required")
 	}
-	if err := keyring.Delete(daemon.KeyringService, *account); err != nil {
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	a, ok := cfg.Account(*account)
+	if !ok {
+		return fmt.Errorf("no account named %q in %s", *account, *cfgPath)
+	}
+	if err := accounts.DeleteKey(*cfgPath, a); err != nil {
 		return err
 	}
 	fmt.Println("Removed the key from the OS keychain. The API key itself still exists in Immich; delete it under Account settings → API keys if you no longer need it.")

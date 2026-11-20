@@ -118,7 +118,8 @@ Secrets never go in the config file; config references a keychain entry.
 [[account]]
 name   = "personal"
 server = "https://photos.example.com"
-# key stored in OS keychain under immich-courier/personal
+# key stored in the OS keychain (service immich-courier, entry "personal@<hash of config path + server>")
+# user_id = "..."  (written at login; a later login under this name must be the same Immich user)
 
 [[folder]]
 path    = "~/Pictures/ToImmich"
@@ -184,9 +185,14 @@ vendoring Immich's generated SDK or copying server code.
 - Served by the running instance (`internal/webui`) on `127.0.0.1:<random port>`, started on demand
   (tray "Settings…", `immich-courier settings`, automatically on first start with no accounts) and
   stopped after 30 idle minutes.
-- Security: random session token in the opening URL → HttpOnly SameSite=Lax cookie (Lax because the
-  SSO return is a cross-site redirect chain), exact Host check (DNS rebinding), custom header +
-  Origin check on every POST (CSRF), strict CSP, no external resources. Covered by tests.
+- Security: the tray/CLI opens `/#t=TICKET` (random, one use, 2-minute expiry, in the fragment so it
+  is never sent in a request line, Referer or log). The page trades it for a session secret
+  (`POST /api/session`), keeps it in sessionStorage (per tab; survives the SSO round trip) and sends
+  it as `X-Courier-Session` on every API call. No cookies: browsers send cookies to every port on
+  127.0.0.1 (confirmed in Chrome, Edge and Firefox, 2026-11-20). Also: exact Host check (DNS
+  rebinding), custom header + Origin check on every POST (CSRF), strict CSP, no external resources.
+  The page's static files need no session. Covered by tests. (Until 2026-11-20 this was an
+  HttpOnly SameSite=Lax cookie holding the token.)
 - Features: add account (server probe → SSO / email+password / API key), log in again, remove
   account (only when no folder uses it), watch/stop watching folders via an in-page folder browser
   (browsers can't hand real paths to a page), create folder, pause/resume, check now, live status.
@@ -203,3 +209,43 @@ vendoring Immich's generated SDK or copying server code.
 - Linux headless: ship a systemd user unit for `immich-courier run`.
 - Release builds: CI for Windows/Linux (pure Go) + macOS runner (CGO), signing/notarization.
 - Per-folder options (album, post-upload action) in the settings page.
+
+### Security audit fixes (2026-11-20)
+
+From the November 2026 audit (how it was run and the results: [SECURITY.md](SECURITY.md)). Each fix
+has a regression test that fails on the pre-fix code.
+
+- **Watched files are opened safely** (`internal/fsafe`): symlinks are never followed (Lstat, and
+  `O_NOFOLLOW` on Unix), FIFOs and devices are never opened blocking (`O_NONBLOCK`), and the opened
+  handle is checked (regular file, settled size and mtime) before hashing. The uploader opens the
+  file once, checks it against the hashed record and uploads from that handle. Hashing stops on
+  cancel. On Windows the check is best effort (Lstat + same-file-ID after open); creating symlinks
+  there needs admin or Developer Mode.
+- **No credentialed redirects off the server's origin**: the Immich client refuses a redirect to
+  another scheme or host (the `x-api-key` header is not stripped by net/http on redirects).
+- **Media types**: the server's list can only narrow the built-in list of known media extensions,
+  never widen it; the cached copy is filtered the same way. New Immich formats must be added to
+  `fallbackExtensions`.
+- **Failures are charged to the file**: any upload failure (network, 5xx, 4xx, unreadable file)
+  gives that file a retry time, so a file the server keeps failing can't block its account. Network
+  errors and 5xx still pause the account; an unreadable file doesn't.
+- **OIDC callback**: a request without the login's `state` is answered 400 and ignored (the login
+  keeps waiting); the provider's free-text `error_description` is not shown.
+- **OS opener**: only absolute http(s) URLs are passed to rundll32 / open / xdg-open (the OAuth
+  URL comes from the server).
+- **CLI `status`** escapes control characters in file names, errors and paths.
+- **Accounts**: logging in under an existing name must be the same server and the same Immich user
+  (recorded as `user_id`); otherwise it is refused, so folders can't silently move to another
+  server or person. Names are unique ignoring case. The keychain is written after all checks and
+  restored if the config save fails. Keychain entries are named `<name>@<hash(config path, server)>`;
+  entries from earlier builds (bare name) are moved on first use. `logout` takes `--config`.
+- **Per-config files**: a config other than `config.toml` gets its own `<file>.state.db`,
+  `<file>.sock` and `<file>.log`, so two configs in one folder never share a queue.
+- **Removed or re-bound folders**: queued files whose folder no longer belongs to the account are
+  dropped (marked rejected, re-hashed if the folder is watched again) instead of uploaded.
+- **Settings page without cookies** (the cookie reaching other local ports was confirmed in all
+  three browsers): one-time 2-minute ticket in the link fragment, traded for a per-tab session
+  secret sent in a header; see "Settings page" above. This also makes a link read from
+  `xdg-open`'s command line (other Linux users) useless once used.
+- **Socket folder ownership**: the daemon and every CLI/tray client refuse a socket folder that is
+  a symlink, belongs to another user, or is writable by others (the shared-`/tmp` fallback).

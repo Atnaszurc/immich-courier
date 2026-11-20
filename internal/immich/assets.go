@@ -7,8 +7,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -53,14 +51,10 @@ type UploadResult struct {
 	Status string `json:"status"` // created | duplicate
 }
 
-// Upload streams one file to the server. The body is never held in memory.
-func (c *Client) Upload(ctx context.Context, path, sha1hex string, modTime time.Time) (UploadResult, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return UploadResult{}, err
-	}
-	defer f.Close()
-
+// Upload streams one file's content to the server under filename. The body
+// is never held in memory. The caller opens (and checks) the file, so what
+// is uploaded is exactly what it verified.
+func (c *Client) Upload(ctx context.Context, f io.Reader, filename, sha1hex string, modTime time.Time) (UploadResult, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 	go func() {
@@ -69,13 +63,13 @@ func (c *Client) Upload(ctx context.Context, path, sha1hex string, modTime time.
 			for k, v := range map[string]string{
 				"fileCreatedAt":  ts,
 				"fileModifiedAt": ts,
-				"filename":       filepath.Base(path),
+				"filename":       filename,
 			} {
 				if err := mw.WriteField(k, v); err != nil {
 					return err
 				}
 			}
-			part, err := mw.CreateFormFile("assetData", filepath.Base(path))
+			part, err := mw.CreateFormFile("assetData", filename)
 			if err != nil {
 				return err
 			}

@@ -81,11 +81,26 @@ func (d *Daemon) serveIPC(ctx context.Context) error {
 }
 
 // ensurePrivateDir creates dir (0700) and refuses to use it if it's a
-// symlink or readable by others, e.g. pre-created by someone else in /tmp.
+// symlink, belongs to another user or is accessible by others, e.g. when
+// someone else created it first in a shared /tmp.
 func ensurePrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	if err := checkSocketDir(dir); err != nil {
+		return err
+	}
+	st, _ := os.Lstat(dir)
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("socket directory %s is accessible by other users (mode %v)", dir, st.Mode().Perm())
+	}
+	return nil
+}
+
+// checkSocketDir refuses a socket directory that someone else could have
+// planted a socket in: a symlink, not owned by this user, or writable by
+// others. Clients check it too, so they never talk to another user's server.
+func checkSocketDir(dir string) error {
 	st, err := os.Lstat(dir)
 	if err != nil {
 		return err
@@ -93,8 +108,11 @@ func ensurePrivateDir(dir string) error {
 	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
 		return fmt.Errorf("socket directory %s is not a plain directory", dir)
 	}
-	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("socket directory %s is accessible by other users (mode %v)", dir, st.Mode().Perm())
+	if !ownedByMe(st) {
+		return fmt.Errorf("socket directory %s belongs to another user", dir)
+	}
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("socket directory %s is writable by other users (mode %v)", dir, st.Mode().Perm())
 	}
 	return nil
 }
@@ -110,6 +128,9 @@ func Dial(cfgPath string) (*Client, error) {
 	sock := SocketPath(cfgPath)
 	if _, err := os.Stat(sock); err != nil {
 		return nil, ErrNotRunning
+	}
+	if err := checkSocketDir(filepath.Dir(sock)); err != nil {
+		return nil, fmt.Errorf("not connecting to immich-courier: %w", err)
 	}
 	return &Client{hc: &http.Client{
 		Timeout: 10 * time.Second,

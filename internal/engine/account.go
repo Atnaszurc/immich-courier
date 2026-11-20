@@ -3,9 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"immich-courier/internal/config"
+	"immich-courier/internal/fsafe"
 	"immich-courier/internal/immich"
 	"immich-courier/internal/state"
 )
@@ -23,14 +24,38 @@ import (
 var fallbackExtensions = strings.Fields(`.3gp .3gpp .avi .flv .insv .m2t .m2ts .m4v .mkv .mov .mp4 .mpe .mpeg .mpg .mts .mxf .ts .vob .webm .wmv
 .avif .bmp .gif .jfif .jpeg .jpg .png .webp .3fr .ari .arw .cap .cin .cr2 .cr3 .crw .dcr .dng .erf .fff .iiq .k25 .kdc .mrw .nef .nrw .orf .ori .pef .psd .raf .raw .rw2 .rwl .sr2 .srf .srw .x3f .heic .heif .hif .insp .jp2 .jpe .jxl .mpo .svg .tif .tiff`)
 
+// knownMedia is every extension the app will ever upload. A server's
+// media-types list can only narrow it: a malicious or intercepted server
+// must not be able to widen uploads to documents or keys in watched folders.
+// When Immich adds a format, add it to fallbackExtensions.
+var knownMedia = func() map[string]bool {
+	m := map[string]bool{}
+	for _, e := range fallbackExtensions {
+		m[e] = true
+	}
+	return m
+}()
+
+// mediaOnly keeps the known media extensions from a server's list.
+func mediaOnly(m immich.MediaTypes) []string {
+	var out []string
+	for _, e := range append(append([]string{}, m.Image...), m.Video...) {
+		if e = strings.ToLower(e); knownMedia[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // account owns one Immich account: it tracks whether the server is
 // reachable and uploads that account's queue while it is.
 type account struct {
-	cfg    config.Account
-	client *immich.Client
-	store  *state.Store
-	log    *slog.Logger
-	opt    Options
+	cfg     config.Account
+	client  *immich.Client
+	store   *state.Store
+	log     *slog.Logger
+	opt     Options
+	folders []string // watched folders bound to this account in the running config
 
 	online     atomic.Bool
 	authFailed atomic.Bool
@@ -59,7 +84,9 @@ func newAccount(cfg config.Account, c *immich.Client, store *state.Store, log *s
 	exts := fallbackExtensions
 	var cached immich.MediaTypes
 	if ok, _ := store.GetMeta("media-types:"+cfg.Server, &cached); ok {
-		exts = append(cached.Image, cached.Video...)
+		if m := mediaOnly(cached); len(m) > 0 {
+			exts = m
+		}
 	}
 	a.setExts(exts)
 	return a
@@ -148,11 +175,15 @@ func (a *account) connectivity(ctx context.Context) {
 
 func (a *account) refreshMediaTypes(ctx context.Context) {
 	m, err := a.client.MediaTypes(ctx)
-	if err != nil || len(m.Image) == 0 {
+	if err != nil {
 		return
 	}
-	a.setExts(append(m.Image, m.Video...))
-	_ = a.store.SetMeta("media-types:"+a.cfg.Server, m)
+	exts := mediaOnly(m)
+	if len(exts) == 0 {
+		return
+	}
+	a.setExts(exts)
+	_ = a.store.SetMeta("media-types:"+a.cfg.Server, immich.MediaTypes{Image: exts})
 }
 
 // goOffline pauses uploads after a network or server error and asks the
@@ -197,13 +228,29 @@ func (a *account) drain(ctx context.Context) {
 		if len(due) == 0 {
 			return
 		}
+		// A folder removed or bound to another account since these were
+		// queued: drop them here. If the folder is watched again, the
+		// file is re-hashed for whichever account it then belongs to.
+		kept := due[:0]
+		for _, d := range due {
+			if a.owns(d.Path) {
+				kept = append(kept, d)
+				continue
+			}
+			d.Status, d.LastError = state.Rejected, "folder no longer uploads to this account"
+			d.Size = -1
+			a.put(d)
+		}
+		if due = kept; len(due) == 0 {
+			continue
+		}
 		items := make([]immich.CheckItem, len(due))
 		for i, d := range due {
 			items[i] = immich.CheckItem{ID: strconv.Itoa(i), Checksum: d.SHA1}
 		}
 		results, err := a.client.BulkUploadCheck(ctx, items)
 		if err != nil {
-			a.handleErr(err, nil, "")
+			a.handleErr(err, nil)
 			return
 		}
 		byID := map[string]immich.CheckResult{}
@@ -233,10 +280,27 @@ func (a *account) drain(ctx context.Context) {
 	}
 }
 
+// owns reports whether path is in a folder bound to this account.
+func (a *account) owns(path string) bool {
+	for _, f := range a.folders {
+		if config.Within(path, f) {
+			return true
+		}
+	}
+	return false
+}
+
 // uploadOne uploads one file; it returns false if draining should stop.
 func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
-	st, err := os.Stat(d.Path)
-	if err != nil || st.Size() != d.Size || st.ModTime().UnixNano() != d.ModTime {
+	// Open once, check that what was opened is the file that was hashed,
+	// and upload from that handle: a symlink or FIFO swapped in after
+	// hashing is never read.
+	f, st, err := fsafe.OpenRegular(d.Path)
+	if err == nil && (st.Size() != d.Size || st.ModTime().UnixNano() != d.ModTime) {
+		f.Close()
+		err = fsafe.ErrNotRegular // treat as changed
+	}
+	if errors.Is(err, fsafe.ErrNotRegular) || errors.Is(err, fs.ErrNotExist) {
 		// Gone or changed since hashing. Drop it from the queue; if it still
 		// exists, the watcher or next rescan re-hashes it.
 		d.Status, d.LastError = state.Rejected, "file changed or removed before upload"
@@ -244,12 +308,16 @@ func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
 		a.put(d)
 		return true
 	}
+	if err != nil {
+		return a.handleErr(err, &d) // e.g. locked by another program: retry this file later
+	}
+	defer f.Close()
 	start := time.Now()
 	a.setUploading(d.Path)
-	res, err := a.client.Upload(ctx, d.Path, d.SHA1, st.ModTime())
+	res, err := a.client.Upload(ctx, f, filepath.Base(d.Path), d.SHA1, st.ModTime())
 	a.setUploading("")
 	if err != nil {
-		return a.handleErr(err, &d, d.Path)
+		return a.handleErr(err, &d)
 	}
 	a.failStreak.Store(0)
 	d.AssetID, d.Attempts, d.NextTry, d.LastError = res.ID, 0, 0, ""
@@ -268,10 +336,13 @@ func (a *account) uploadOne(ctx context.Context, d state.Entry) bool {
 	return true
 }
 
-// handleErr classifies an error. Network errors and 5xx pause the account;
-// 401 stops it until the user logs in again; other 4xx mark only this file
-// as failed and schedule a retry. It returns whether draining can continue.
-func (a *account) handleErr(err error, d *state.Entry, path string) bool {
+// handleErr classifies an error. 401 stops the account until the user logs
+// in again. Any other failure while uploading a file is charged to that
+// file (it is retried later, with backoff), so one bad file can't stay at
+// the head of the queue. On top of that, network errors and 5xx pause the
+// account; a file that can't be read locally doesn't. It returns whether
+// draining can continue.
+func (a *account) handleErr(err error, d *state.Entry) bool {
 	if errors.Is(err, context.Canceled) {
 		return false // shutting down or reloading; the file stays queued
 	}
@@ -279,28 +350,31 @@ func (a *account) handleErr(err error, d *state.Entry, path string) bool {
 	a.lastError = err.Error()
 	a.statMu.Unlock()
 	var apiErr *immich.APIError
-	switch {
-	case !errors.As(err, &apiErr):
-		a.goOffline(err)
-		return false
-	case apiErr.Status >= 500:
-		a.goOffline(err)
-		return false
-	case apiErr.Status == http.StatusUnauthorized:
+	isAPI := errors.As(err, &apiErr)
+	if isAPI && apiErr.Status == http.StatusUnauthorized {
 		a.authFailed.Store(true)
 		a.log.Error("the API key was rejected; uploads stopped for this account. Log in again: immich-courier login --account "+a.cfg.Name+" --server "+a.cfg.Server, "err", err)
 		return false
 	}
-	if d == nil {
+	if d != nil {
+		d.Status = state.Failed
+		d.Attempts++
+		d.LastError = err.Error()
+		d.NextTry = time.Now().Add(retryDelay(d.Attempts)).Unix()
+		a.put(*d)
+	}
+	var pathErr *fs.PathError
+	switch {
+	case d != nil && errors.As(err, &pathErr):
+		// The file couldn't be read (locked, permissions); not a server problem.
+	case !isAPI || apiErr.Status >= 500:
+		a.goOffline(err)
+		return false
+	case d == nil:
 		a.log.Error("upload check failed", "err", err)
 		return false
 	}
-	d.Status = state.Failed
-	d.Attempts++
-	d.LastError = err.Error()
-	d.NextTry = time.Now().Add(retryDelay(d.Attempts)).Unix()
-	a.put(*d)
-	a.log.Warn("upload failed, will retry", "path", path, "attempt", d.Attempts, "err", err)
+	a.log.Warn("upload failed, will retry", "path", d.Path, "attempt", d.Attempts, "err", err)
 	return true
 }
 

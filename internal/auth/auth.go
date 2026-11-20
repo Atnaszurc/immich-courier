@@ -8,14 +8,18 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
+	"unicode"
 
 	"immich-courier/internal/immich"
 )
@@ -88,12 +92,18 @@ func OIDCLogin(ctx context.Context, c *immich.Client, opt OIDCOptions) (Session,
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(state)) != 1 {
+			// Not the answer to this login (anything on this machine can
+			// reach the port): ignore it and keep waiting.
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
 		var res result
 		switch {
 		case q.Get("error") != "":
-			res.err = fmt.Errorf("identity provider returned %s: %s", q.Get("error"), q.Get("error_description"))
-		case q.Get("state") != state:
-			res.err = errors.New("state mismatch in callback")
+			// Only the error code: the description is free text chosen by
+			// whoever sent the browser here.
+			res.err = fmt.Errorf("the identity provider refused the login (%s)", printable(q.Get("error"), 64))
 		case q.Get("code") == "":
 			res.err = errors.New("no code in callback")
 		default:
@@ -123,6 +133,9 @@ func OIDCLogin(ctx context.Context, c *immich.Client, opt OIDCOptions) (Session,
 	authURL, err := c.OAuthAuthorize(ctx, redirectURI, state, challenge)
 	if err != nil {
 		return Session{}, fmt.Errorf("start OAuth login: %w", err)
+	}
+	if err := checkWebURL(authURL); err != nil {
+		return Session{}, fmt.Errorf("the server's login address: %w", err)
 	}
 	if opt.OnURL != nil {
 		opt.OnURL(authURL)
@@ -167,8 +180,36 @@ func MintAPIKey(ctx context.Context, baseURL string, s Session, keyName string) 
 	return key, nil
 }
 
-// OpenBrowser opens url in the user's default browser.
+// checkWebURL accepts only absolute http(s) URLs. The OS openers below run
+// whatever handler a URL names (file:, ms-settings:, a local program path),
+// and some URLs come from the server, so nothing else is passed to them.
+func checkWebURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%q isn't an http(s) address", printable(s, 200))
+	}
+	return nil
+}
+
+// printable truncates s and drops control characters, for error messages.
+func printable(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+// OpenBrowser opens an http(s) URL in the user's default browser.
 func OpenBrowser(url string) error {
+	if err := checkWebURL(url); err != nil {
+		return err
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
