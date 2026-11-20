@@ -20,6 +20,36 @@ server. Each folder can upload to a different Immich account.
 
 See [SPEC.md](SPEC.md) for the design.
 
+## Download
+
+Builds for Windows, macOS and Linux are on the
+[Releases](../../releases) page: a `.zip` for Windows, a `.tar.gz` for macOS (one
+universal binary for Apple Silicon and Intel) and Linux, for amd64 and arm64.
+
+**The binaries are not code-signed.** Signing costs money every year, and this is a
+free hobby project. Your system will warn you the first time:
+
+- **Windows:** SmartScreen says "Windows protected your PC". Click **More info → Run
+  anyway**. (Or before extracting: right-click the zip → **Properties** → tick
+  **Unblock**.)
+- **macOS:** it says the app can't be opened because Apple can't check it. Remove the
+  download flag in Terminal, then start it as usual:
+  ```sh
+  xattr -d com.apple.quarantine ./immich-courier
+  ```
+  Or try to open it once, then go to **System Settings → Privacy & Security** and click
+  **Open Anyway**.
+- **Linux:** no warning; make it executable with `chmod +x immich-courier` if needed.
+
+Instead of a signature, every release comes with a `SHA256SUMS` file and a build
+provenance attestation, which proves a file was built by this repository's GitHub
+workflow from a specific commit. To check a download with the
+[GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify immich-courier-v1.0.0-linux-amd64.tar.gz --repo OWNER/immich-courier
+```
+
 ## Getting started
 
 1. Start `immich-courier` (on Windows, double-click it). It goes to the system tray,
@@ -51,6 +81,11 @@ scripted bulk uploads, the official Immich CLI is a good fit.
 ```sh
 go build -o bin/ ./cmd/immich-courier
 ```
+
+Windows and Linux builds are pure Go and cross-compile from anywhere. macOS builds need
+a Mac with the Xcode command line tools, because the tray icon uses CGO there.
+Releases are built by [.github/workflows/release.yml](.github/workflows/release.yml)
+when a `v*` tag is pushed.
 
 ## Security
 

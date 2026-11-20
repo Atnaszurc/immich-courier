@@ -249,3 +249,17 @@ has a regression test that fails on the pre-fix code.
   `xdg-open`'s command line (other Linux users) useless once used.
 - **Socket folder ownership**: the daemon and every CLI/tray client refuse a socket folder that is
   a symlink, belongs to another user, or is writable by others (the shared-`/tmp` fallback).
+
+### Release builds (2026-11-20)
+
+- GitHub Actions: `ci.yml` vets and tests on Linux, Windows and macOS for every push and pull
+  request, and checks that the committed Windows `.syso` resources still rebuild byte for byte.
+  `release.yml` runs on a `v*` tag: Linux and Windows (amd64, arm64) cross-compiled with
+  `CGO_ENABLED=0` on Ubuntu; macOS built on a macOS runner (CGO for the tray), arm64 + amd64
+  joined with `lipo` into one universal binary, minimum macOS 11. Output: zip (Windows) or
+  tar.gz with LICENSE, README and SECURITY, plus `SHA256SUMS` and build provenance
+  attestations, in a **draft** release to review and publish by hand.
+- Decision: **no code signing** on any platform (cost). The README explains the SmartScreen
+  and Gatekeeper warnings; provenance attestations stand in for a signature. Go's linker still
+  ad-hoc signs darwin/arm64 code, which Apple Silicon requires.
+- Dependabot opens weekly updates for the actions and Go modules.

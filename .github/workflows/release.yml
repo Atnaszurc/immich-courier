@@ -1,0 +1,116 @@
+# Builds release binaries when a version tag (v1.2.3) is pushed, and creates
+# a draft GitHub Release with them, a SHA256SUMS file and build provenance
+# attestations. Review the draft, then publish it.
+#
+# Binaries are not code-signed (see README "Downloads"). macOS arm64 code
+# gets the ad-hoc signature Go's linker always adds; nothing more.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Windows and Linux are pure Go (the tray uses DBus on Linux), so one
+  # Linux runner cross-compiles both.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false # release builds start clean
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+        run: |
+          name="immich-courier-${VERSION}-${GOOS}-${GOARCH}"
+          exe=immich-courier; [ "$GOOS" = windows ] && exe=immich-courier.exe
+          mkdir -p "pkg/$name" dist
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "pkg/$name/$exe" ./cmd/immich-courier
+          cp LICENSE README.md SECURITY.md "pkg/$name/"
+          cd pkg
+          if [ "$GOOS" = windows ]; then
+            zip -qr "../dist/$name.zip" "$name"
+          else
+            tar -czf "../dist/$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The macOS tray needs CGO, so it builds on a Mac. Both architectures are
+  # built on the (Apple Silicon) runner and joined into one universal binary.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build universal binary
+        env:
+          CGO_ENABLED: "1"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          VERSION: ${{ github.ref_name }}
+        run: |
+          flags=(-trimpath -ldflags "-s -w -X main.version=${VERSION}")
+          GOARCH=arm64 CC="clang -arch arm64" go build "${flags[@]}" -o build/arm64 ./cmd/immich-courier
+          GOARCH=amd64 CC="clang -arch x86_64" go build "${flags[@]}" -o build/amd64 ./cmd/immich-courier
+          name="immich-courier-${VERSION}-macos-universal"
+          mkdir -p "pkg/$name" dist
+          lipo -create -output "pkg/$name/immich-courier" build/arm64 build/amd64
+          lipo -info "pkg/$name/immich-courier"
+          cp LICENSE README.md SECURITY.md "pkg/$name/"
+          tar -C pkg -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [cross, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --draft --verify-tag --title "$TAG" --generate-notes
