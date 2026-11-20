@@ -32,13 +32,12 @@ free hobby project. Your system will warn you the first time:
 - **Windows:** SmartScreen says "Windows protected your PC". Click **More info → Run
   anyway**. (Or before extracting: right-click the zip → **Properties** → tick
   **Unblock**.)
-- **macOS:** it says the app can't be opened because Apple can't check it. Remove the
-  download flag in Terminal, then start it as usual:
-  ```sh
-  xattr -d com.apple.quarantine ./immich-courier
-  ```
-  Or try to open it once, then go to **System Settings → Privacy & Security** and click
-  **Open Anyway**.
+- **macOS:** the first start fails with "Apple could not verify 'immich-courier' is free of
+  malware" and offers only **Move to Trash** or **Done**. Click **Done**, go to
+  **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to
+  immich-courier, then start it again: the same warning now has an **Open Anyway** button,
+  which asks for your password once. After that it starts normally. (Or, in Terminal, remove
+  the download flag before the first start: `xattr -d com.apple.quarantine ./immich-courier`.)
 - **Linux:** no warning; make it executable with `chmod +x immich-courier` if needed.
 
 Instead of a signature, every release comes with a `SHA256SUMS` file and a build
@@ -56,7 +55,9 @@ gh attestation verify immich-courier-v1.0.0-linux-amd64.tar.gz --repo Atnaszurc/
    and the first time it opens its settings page in your browser.
 2. **Add account:** enter your Immich server's address and log in with single
    sign-on, email and password, or an API key. The app keeps its own upload-only
-   key in your system's keychain, never your password.
+   key in your system's keychain, never your password. (On macOS it's in the
+   **Keychain Access** app under the login keychain, entry "immich-courier"; the newer
+   Passwords app doesn't list it.)
 3. **Add folder:** pick a folder and the account it uploads to.
 4. In the tray menu, turn on **Start at login**.
 
