@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"image/png"
+	"strings"
 	"testing"
 
 	"immich-courier/internal/daemon"
@@ -61,5 +62,38 @@ func TestIconsEncode(t *testing.T) {
 		if hdr != [3]uint16{0, 1, 2} {
 			t.Fatalf("bad ico header %v", hdr)
 		}
+	}
+}
+
+func TestMacAppBundle(t *testing.T) {
+	for exe, want := range map[string]string{
+		"/Applications/immich-courier.app/Contents/MacOS/immich-courier": "/Applications/immich-courier.app",
+		"/Users/a/Downloads/immich-courier":                              "",
+		"/x/My.app/Contents/MacOS/sub/tool":                              "",
+	} {
+		got, ok := macAppBundle(exe)
+		if got != want || ok != (want != "") {
+			t.Errorf("macAppBundle(%q) = %q, %v; want %q", exe, got, ok, want)
+		}
+	}
+}
+
+// Inside an .app, the login item opens the app through LaunchServices (its
+// own Local Network permission, no second copy); a bare binary runs directly.
+func TestLaunchAgentPlist(t *testing.T) {
+	app := launchAgentPlist([]string{"/Applications/immich-courier.app/Contents/MacOS/immich-courier", "tray", "--config", "/Users/a/b & c.toml"})
+	for _, want := range []string{
+		"<string>/usr/bin/open</string>", "<string>-a</string>",
+		"<string>/Applications/immich-courier.app</string>", "<string>--args</string>",
+		"<string>/Users/a/b &amp; c.toml</string>", "<string>" + BundleID + "</string>",
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app plist lacks %s:\n%s", want, app)
+		}
+	}
+	bare := launchAgentPlist([]string{"/usr/local/bin/immich-courier", "tray"})
+	if strings.Contains(bare, "/usr/bin/open") || strings.Contains(bare, "AssociatedBundleIdentifiers") ||
+		!strings.Contains(bare, "<string>/usr/local/bin/immich-courier</string>") {
+		t.Errorf("bare binary plist:\n%s", bare)
 	}
 }

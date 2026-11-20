@@ -23,8 +23,9 @@ See [SPEC.md](SPEC.md) for the design.
 ## Download
 
 Builds for Windows, macOS and Linux are on the
-[Releases](../../releases) page: a `.zip` for Windows, a `.tar.gz` for macOS (one
-universal binary for Apple Silicon and Intel) and Linux, for amd64 and arm64.
+[Releases](../../releases) page: a `.zip` for Windows and a `.tar.gz` for Linux (amd64
+and arm64), and for macOS a `.zip` with `immich-courier.app` (Apple Silicon and Intel).
+On macOS, move `immich-courier.app` to **Applications** before you start it.
 
 **The binaries are not code-signed.** Signing costs money every year, and this is a
 free hobby project. Your system will warn you the first time:
@@ -37,7 +38,12 @@ free hobby project. Your system will warn you the first time:
   **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to
   immich-courier, then start it again: the same warning now has an **Open Anyway** button,
   which asks for your password once. After that it starts normally. (Or, in Terminal, remove
-  the download flag before the first start: `xattr -d com.apple.quarantine ./immich-courier`.)
+  the download flag before the first start:
+  `xattr -dr com.apple.quarantine /Applications/immich-courier.app`.)
+  If your Immich server is on your home network, macOS then asks to let immich-courier
+  find devices on your local network: click **Allow**, or uploads fail with "no route to
+  host". You can change it later under **Privacy & Security → Local Network**. Updates are
+  new unsigned builds, so macOS may ask again after each one.
 - **Linux:** no warning; make it executable with `chmod +x immich-courier` if needed.
 
 Instead of a signature, every release comes with a `SHA256SUMS` file and a build
@@ -74,8 +80,10 @@ The same program is a command-line tool when given arguments: `login`,
 `add-folder`, `status`, `pause`, `resume`, `rescan`, `stop`, `list`, `run`
 (headless, for servers) and `settings --print` (URL for an SSH tunnel). Run
 `immich-courier help` for details. On Windows the command line is mainly meant
-for Windows 11 24H2 and later and may behave differently on older versions. For
-scripted bulk uploads, the official Immich CLI is a good fit.
+for Windows 11 24H2 and later and may behave differently on older versions. On
+macOS the program is inside the app:
+`/Applications/immich-courier.app/Contents/MacOS/immich-courier status` (or link it
+into your PATH). For scripted bulk uploads, the official Immich CLI is a good fit.
 
 ### Building from source
 

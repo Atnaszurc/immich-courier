@@ -256,10 +256,36 @@ has a regression test that fails on the pre-fix code.
   request, and checks that the committed Windows `.syso` resources still rebuild byte for byte.
   `release.yml` runs on a `v*` tag: Linux and Windows (amd64, arm64) cross-compiled with
   `CGO_ENABLED=0` on Ubuntu; macOS built on a macOS runner (CGO for the tray), arm64 + amd64
-  joined with `lipo` into one universal binary, minimum macOS 11. Output: zip (Windows) or
+  joined with `lipo` into one universal binary in an `.app` (see "macOS app bundle"), minimum macOS 11. Output: zip (Windows, macOS) or
   tar.gz with LICENSE, README and SECURITY, plus `SHA256SUMS` and build provenance
   attestations, in a **draft** release to review and publish by hand.
 - Decision: **no code signing** on any platform (cost). The README explains the SmartScreen
   and Gatekeeper warnings; provenance attestations stand in for a signature. Go's linker still
   ad-hoc signs darwin/arm64 code, which Apple Silicon requires.
 - Dependabot opens weekly updates for the actions and Go modules.
+
+### macOS app bundle (2026-11-20)
+
+Found by testing v0.0.1/v0.0.2-test on Apple Silicon (macOS 26):
+- A **bare binary started by launchd** (the Start-at-login LaunchAgent) got "no route to host"
+  for a LAN Immich server, although the same binary worked from Terminal and immich-courier was
+  listed as allowed under Privacy & Security → Local Network. Started from Terminal, Terminal is
+  the "responsible" app and lends its Local Network permission; started by launchd, the bare
+  binary has no stable app identity to hold that permission.
+- **Turning Start at login on killed the running copy** (SIGKILL: nothing in the log, even after
+  SIGTERM got a handler) the first time macOS registered the new login item; later toggles didn't.
+
+So macOS releases ship `immich-courier.app` (zip):
+- `packaging/macos/Info.plist`: bundle ID `io.github.atnaszurc.immich-courier`, `LSUIElement`
+  (menu bar only, no Dock icon), `NSLocalNetworkUsageDescription` (so macOS can show the Local
+  Network prompt), minimum macOS 11. Icon: `.icns` built by `iconutil` from
+  `tools/winicon -iconset`, same artwork as the Windows icon.
+- Ad-hoc signed (`codesign --sign -`), no Developer ID. The signature seals Info.plist to the
+  binary. Each build has a new ad-hoc identity, so macOS may ask for Local Network again after an
+  update.
+- Start at login from inside a bundle: the LaunchAgent runs `/usr/bin/open -g -a <app> --args
+  tray [--config …]`, so LaunchServices starts it as the app (own permission; no second copy if
+  already running) and `AssociatedBundleIdentifiers` shows its name and icon in Login Items. A
+  bare binary (built from source) is still started directly.
+- Not yet verified on a Mac when written: that the prompt appears and LAN uploads work at login,
+  and whether enabling Start at login still kills the running copy.

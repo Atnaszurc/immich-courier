@@ -54,27 +54,7 @@ func setAutostart(on bool, args []string) error {
 		if !on {
 			return removeIfExists(p)
 		}
-		var argXML strings.Builder
-		for _, a := range cmd {
-			fmt.Fprintf(&argXML, "\t\t<string>%s</string>\n", xmlEscape(a))
-		}
-		plist := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>` + launchAgentLabel + `</string>
-	<key>ProgramArguments</key>
-	<array>
-` + argXML.String() + `	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>ProcessType</key>
-	<string>Interactive</string>
-</dict>
-</plist>
-`
-		return writeFile(p, plist)
+		return writeFile(p, launchAgentPlist(cmd))
 	default:
 		p := xdgAutostartPath()
 		if !on {
@@ -91,7 +71,57 @@ func setAutostart(on bool, args []string) error {
 	}
 }
 
-const launchAgentLabel = "io.github.immich-courier"
+const (
+	launchAgentLabel = "io.github.immich-courier"
+	// BundleID is the macOS .app bundle identifier (see packaging/macos).
+	BundleID = "io.github.atnaszurc.immich-courier"
+)
+
+// macAppBundle returns the .app bundle that contains exe, if any.
+func macAppBundle(exe string) (string, bool) {
+	const marker = ".app/Contents/MacOS/"
+	i := strings.LastIndex(exe, marker)
+	if i < 0 || strings.Contains(exe[i+len(marker):], "/") {
+		return "", false
+	}
+	return exe[:i+len(".app")], true
+}
+
+// launchAgentPlist is the per-user LaunchAgent that starts the tray at login.
+//
+// Inside an .app bundle it runs `open -a`, so macOS starts the app the way
+// it does when the user opens it: as that app, with its own Local Network
+// permission and prompt (a bare binary started by launchd gets "no route to
+// host" for LAN servers), and without a second copy if it's already running.
+// AssociatedBundleIdentifiers shows the app's name and icon in Login Items.
+// A bare binary (e.g. built from source) is started directly, as before.
+func launchAgentPlist(cmd []string) string {
+	args, assoc := cmd, ""
+	if app, ok := macAppBundle(cmd[0]); ok {
+		args = append([]string{"/usr/bin/open", "-g", "-a", app, "--args"}, cmd[1:]...)
+		assoc = "\t<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>" + BundleID + "</string>\n\t</array>\n"
+	}
+	var argXML strings.Builder
+	for _, a := range args {
+		fmt.Fprintf(&argXML, "\t\t<string>%s</string>\n", xmlEscape(a))
+	}
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>` + launchAgentLabel + `</string>
+` + assoc + `	<key>ProgramArguments</key>
+	<array>
+` + argXML.String() + `	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>
+`
+}
 
 func launchAgentPath() string {
 	home, _ := os.UserHomeDir()

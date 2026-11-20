@@ -58,7 +58,9 @@ jobs:
           if-no-files-found: error
 
   # The macOS tray needs CGO, so it builds on a Mac. Both architectures are
-  # built on the (Apple Silicon) runner and joined into one universal binary.
+  # built on the (Apple Silicon) runner and joined into one universal binary,
+  # shipped as immich-courier.app (an app bundle gets its own Local Network
+  # permission and prompt; a bare binary started at login does not).
   macos:
     runs-on: macos-latest
     steps:
@@ -78,12 +80,36 @@ jobs:
           flags=(-trimpath -ldflags "-s -w -X main.version=${VERSION}")
           GOARCH=arm64 CC="clang -arch arm64" go build "${flags[@]}" -o build/arm64 ./cmd/immich-courier
           GOARCH=amd64 CC="clang -arch x86_64" go build "${flags[@]}" -o build/amd64 ./cmd/immich-courier
-          name="immich-courier-${VERSION}-macos-universal"
+          lipo -create -output build/immich-courier build/arm64 build/amd64
+          lipo -info build/immich-courier
+      - name: Assemble immich-courier.app
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          app=build/immich-courier.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp build/immich-courier "$app/Contents/MacOS/immich-courier"
+          # Bundle versions must be numbers: v1.2.3-test -> 1.2.3
+          version=$(echo "${TAG#v}" | sed -E 's/^([0-9]+(\.[0-9]+){0,2}).*/\1/')
+          sed -e "s/__VERSION__/${version}/g" -e "s/__TAG__/${TAG}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          go run ./tools/winicon -iconset build/AppIcon.iconset
+          iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" build/AppIcon.iconset
+          # Ad-hoc signature (no Apple Developer ID): seals Info.plist and
+          # resources to the binary, which macOS needs to treat it as one app.
+          codesign --force --sign - --timestamp=none "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -E "Identifier|Format|Signature"
+      - name: Package
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          name="immich-courier-${VERSION}-macos"
           mkdir -p "pkg/$name" dist
-          lipo -create -output "pkg/$name/immich-courier" build/arm64 build/amd64
-          lipo -info "pkg/$name/immich-courier"
+          ditto build/immich-courier.app "pkg/$name/immich-courier.app"
           cp LICENSE README.md SECURITY.md "pkg/$name/"
-          tar -C pkg -czf "dist/$name.tar.gz" "$name"
+          # ditto keeps the bundle's extended attributes and signature intact.
+          ditto -c -k --keepParent "pkg/$name" "dist/$name.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: dist-macos

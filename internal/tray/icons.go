@@ -41,6 +41,10 @@ func iconBytes(s iconState) []byte {
 // sizes Explorer and the taskbar use.
 func AppIconICO() []byte { return ico(iconIdle, 16, 20, 24, 32, 40, 48, 64, 256) }
 
+// AppIconPNG is the application icon as a size×size PNG (for the macOS
+// .app bundle's .icns).
+func AppIconPNG(size int) []byte { return pngBytes(render(iconIdle, size)) }
+
 // render draws the icon at size×size with 4×4 supersampling for smooth edges.
 // Shapes are defined on a 0..1 unit square.
 func render(s iconState, size int) *image.NRGBA {

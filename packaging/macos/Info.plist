@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Info.plist for immich-courier.app. The release workflow replaces
+     __VERSION__ (e.g. 1.2.3) and __TAG__ (e.g. v1.2.3). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.atnaszurc.immich-courier</string>
+	<key>CFBundleName</key>
+	<string>immich-courier</string>
+	<key>CFBundleDisplayName</key>
+	<string>immich-courier</string>
+	<key>CFBundleExecutable</key>
+	<string>immich-courier</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>CFBundleGetInfoString</key>
+	<string>immich-courier __TAG__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<!-- Menu bar app: no Dock icon, no app menu. -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- Shown in the macOS Local Network permission prompt. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>immich-courier uploads your photos and videos to your Immich server, which may be on your local network.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT License</string>
+</dict>
+</plist>
