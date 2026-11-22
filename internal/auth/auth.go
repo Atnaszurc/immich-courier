@@ -164,10 +164,11 @@ func OIDCLogin(ctx context.Context, c *immich.Client, opt OIDCOptions) (Session,
 }
 
 // MintAPIKey uses a session to create the app's API key, then logs the
-// session out. The session is logged out even if key creation fails.
-func MintAPIKey(ctx context.Context, baseURL string, s Session, keyName string) (immich.APIKey, error) {
-	c := immich.New(baseURL)
-	c.AccessToken = s.Token
+// session out. The session is logged out even if key creation fails. srv
+// gives the server and any custom headers; its credentials are not used.
+func MintAPIKey(ctx context.Context, srv *immich.Client, s Session, keyName string) (immich.APIKey, error) {
+	c := *srv
+	c.APIKey, c.AccessToken = "", s.Token
 	key, err := c.CreateAPIKey(ctx, keyName, Permissions)
 	logoutErr := c.Logout(ctx)
 	if err != nil {

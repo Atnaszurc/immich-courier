@@ -83,8 +83,14 @@ type job struct {
 	modTime time.Time
 }
 
-// New builds an engine. apiKeys maps account name to its API key.
-func New(cfg *config.Config, apiKeys map[string]string, store *state.Store, log *slog.Logger, opt Options) (*Engine, error) {
+// Credentials are what an account sends to its server.
+type Credentials struct {
+	APIKey  string
+	Headers []immich.Header // custom headers for a proxy in front of Immich
+}
+
+// New builds an engine. creds maps account name to its credentials.
+func New(cfg *config.Config, creds map[string]Credentials, store *state.Store, log *slog.Logger, opt Options) (*Engine, error) {
 	opt.defaults()
 	e := &Engine{
 		folders:   cfg.Folders,
@@ -104,12 +110,12 @@ func New(cfg *config.Config, apiKeys map[string]string, store *state.Store, log 
 		if !ok {
 			return nil, fmt.Errorf("folder %s: unknown account %q", f.Path, f.Account)
 		}
-		key, ok := apiKeys[a.Name]
-		if !ok || key == "" {
+		cr, ok := creds[a.Name]
+		if !ok || cr.APIKey == "" {
 			return nil, fmt.Errorf("account %q has no API key; run: immich-courier login --account %s --server %s", a.Name, a.Name, a.Server)
 		}
 		c := immich.New(a.Server)
-		c.APIKey = key
+		c.APIKey, c.Headers = cr.APIKey, cr.Headers
 		e.accounts[a.Name] = newAccount(a, c, store, log, opt)
 	}
 	for _, f := range cfg.Folders {

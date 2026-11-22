@@ -48,6 +48,7 @@ func main() {
 		"stop":          ipcCmd("stop", (*daemon.Client).Quit, "Stopped."),
 		"login":         cmdLogin,
 		"logout":        cmdLogout,
+		"headers":       cmdHeaders,
 		"add-folder":    cmdAddFolder,
 		"remove-folder": cmdRemoveFolder,
 		"list":          cmdList,
@@ -104,7 +105,9 @@ tray's Settings page. The commands below are for scripting and servers.
 Setup:
   settings       open the settings page of the running instance [--print]
   login          --account NAME --server URL [--method auto|oidc|password|apikey]
+                 [--header NAME ...]  (custom headers for a proxy; values are prompted)
   logout         --account NAME
+  headers        --account NAME [--header NAME ... | --clear]  show or replace custom headers
   add-folder     --path DIR --account NAME
   remove-folder  --path DIR
   list           show accounts and folders
@@ -326,6 +329,11 @@ func cmdList(ctx context.Context, args []string) error {
 			key = "NO API KEY (run login)"
 		}
 		fmt.Printf("\nAccount %q  %s  [%s]\n", a.Name, a.Server, key)
+		if hs, err := accounts.LoadHeaders(*cfgPath, a); err != nil {
+			fmt.Println("  custom headers:", err)
+		} else if len(hs) > 0 {
+			fmt.Println("  custom headers:", strings.Join(immich.HeaderNames(hs), ", "))
+		}
 		if c := counts[a.Name]; c != nil {
 			fmt.Printf("  uploaded %d, already in Immich %d, waiting %d, failed %d, rejected %d\n",
 				c[state.Uploaded], c[state.Duplicate], c[state.Queued], c[state.Failed], c[state.Rejected])
@@ -347,6 +355,7 @@ func cmdLogin(ctx context.Context, args []string) error {
 	method := fs.String("method", "auto", "auto, oidc, password or apikey")
 	email := fs.String("email", "", "email for password login (prompted if empty)")
 	port := fs.Int("port", auth.DefaultCallbackPort, "loopback port for OIDC login")
+	headerNames := headerFlag(fs)
 	fs.Parse(args)
 	if *account == "" || *server == "" {
 		fs.Usage()
@@ -355,12 +364,26 @@ func cmdLogin(ctx context.Context, args []string) error {
 	if err := accounts.ValidName(*account); err != nil {
 		return err
 	}
-	info, err := accounts.Probe(ctx, *server)
+	// Without --header an existing account keeps its headers; with it, the
+	// given set replaces them.
+	var in []immich.Header
+	var err error
+	if len(*headerNames) > 0 {
+		if in, err = promptHeaders(*headerNames); err != nil {
+			return err
+		}
+	}
+	hs, err := accounts.ResolveHeaders(*cfgPath, *account, *server, in)
+	if err != nil {
+		return err
+	}
+	warnPlainHTTP(*server, hs)
+	info, err := accounts.Probe(ctx, *server, hs)
 	if err != nil {
 		return err
 	}
 	*server = info.Server
-	c := immich.New(*server)
+	c := accounts.Client(*server, hs)
 	feat := info
 	fmt.Printf("Immich %s at %s (OAuth: %v, password login: %v)\n", info.Version, *server, feat.OAuth, feat.PasswordLogin)
 
@@ -410,7 +433,7 @@ func cmdLogin(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("Logged in as %s <%s>\n", s.Name, s.Email)
 		var warn error
-		secret, warn, err = accounts.KeyFromSession(ctx, *server, s)
+		secret, warn, err = accounts.KeyFromSession(ctx, c, s)
 		if err != nil {
 			return err
 		}
@@ -429,7 +452,7 @@ func cmdLogin(ctx context.Context, args []string) error {
 		return fmt.Errorf("unknown method %q", m)
 	}
 
-	u, err := accounts.Save(ctx, *cfgPath, *account, *server, secret)
+	u, err := accounts.Save(ctx, *cfgPath, *account, *server, secret, hs)
 	if err != nil {
 		return err
 	}
@@ -481,8 +504,109 @@ func cmdLogout(ctx context.Context, args []string) error {
 	if err := accounts.DeleteKey(*cfgPath, a); err != nil {
 		return err
 	}
-	fmt.Println("Removed the key from the OS keychain. The API key itself still exists in Immich; delete it under Account settings → API keys if you no longer need it.")
+	fmt.Println("Removed the key (and any custom headers) from the OS keychain. The API key itself still exists in Immich; delete it under Account settings → API keys if you no longer need it.")
 	return nil
+}
+
+func cmdHeaders(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("headers", flag.ExitOnError)
+	cfgPath := configFlag(fs)
+	account := fs.String("account", "", "account profile name (required)")
+	clear := fs.Bool("clear", false, "remove all custom headers")
+	headerNames := headerFlag(fs)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `Usage: immich-courier headers --account NAME [--header NAME ... | --clear]
+
+Custom headers are sent with every request to the account's server, for a
+reverse proxy in front of Immich that has its own login (for example basic
+auth: --header Authorization, value "Basic <base64 of user:password>").
+Values are asked for and stored in the OS keychain, never in the config.
+
+Without --header or --clear, lists the header names. --header replaces the
+whole set; press Enter at a value prompt to keep that header's current value.
+`)
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+	if *account == "" {
+		fs.Usage()
+		return errors.New("--account is required")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	a, ok := cfg.Account(*account)
+	if !ok {
+		return fmt.Errorf("no account named %q in %s", *account, *cfgPath)
+	}
+	if !*clear && len(*headerNames) == 0 {
+		hs, err := accounts.LoadHeaders(*cfgPath, a)
+		if err != nil {
+			return err
+		}
+		if len(hs) == 0 {
+			fmt.Printf("Account %q has no custom headers.\n", a.Name)
+			return nil
+		}
+		fmt.Printf("Account %q sends: %s\n", a.Name, strings.Join(immich.HeaderNames(hs), ", "))
+		return nil
+	}
+	if *clear && len(*headerNames) > 0 {
+		return errors.New("use either --header or --clear")
+	}
+	var in []immich.Header // nil (with --clear) removes them all
+	if !*clear {
+		if in, err = promptHeaders(*headerNames); err != nil {
+			return err
+		}
+		warnPlainHTTP(a.Server, in)
+	}
+	hs, err := accounts.SetHeaders(ctx, *cfgPath, a.Name, in)
+	if err != nil {
+		return err
+	}
+	if len(hs) == 0 {
+		fmt.Printf("Account %q no longer sends custom headers.\n", a.Name)
+	} else {
+		fmt.Printf("Checked with %s. Account %q now sends: %s\n", a.Server, a.Name, strings.Join(immich.HeaderNames(hs), ", "))
+	}
+	notifyReload(ctx, *cfgPath)
+	return nil
+}
+
+// headerFlag adds a repeatable --header NAME flag. Only names: values are
+// prompted for, so they never land in shell history or the process list.
+func headerFlag(fs *flag.FlagSet) *[]string {
+	var names []string
+	fs.Func("header", "custom header NAME to send to the server (repeatable; the value is prompted for)", func(s string) error {
+		if strings.ContainsAny(s, ":=") {
+			return errors.New("give only the header name; the value is asked for")
+		}
+		names = append(names, s)
+		return nil
+	})
+	return &names
+}
+
+func promptHeaders(names []string) ([]immich.Header, error) {
+	hs := make([]immich.Header, 0, len(names))
+	for _, n := range names {
+		v, err := promptSecret(fmt.Sprintf("Value for %s: ", n))
+		if err != nil {
+			return nil, err
+		}
+		hs = append(hs, immich.Header{Name: n, Value: v})
+	}
+	return hs, nil
+}
+
+// warnPlainHTTP warns when custom headers (often proxy passwords) would go
+// over unencrypted http.
+func warnPlainHTTP(server string, hs []immich.Header) {
+	if len(hs) > 0 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(server)), "http://") {
+		fmt.Fprintln(os.Stderr, "warning: the server address is http://, so the custom headers are sent unencrypted.")
+	}
 }
 
 func prompt(label string) string {

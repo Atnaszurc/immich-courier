@@ -34,6 +34,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/login/oidc", s.apiLoginOIDC)
 	mux.HandleFunc("GET /api/login/oidc", s.apiLoginOIDCStatus)
 	mux.HandleFunc("POST /api/accounts/remove", s.apiRemoveAccount)
+	mux.HandleFunc("POST /api/accounts/headers", s.apiSetHeaders)
 	mux.HandleFunc("POST /api/folders/add", s.apiAddFolder)
 	mux.HandleFunc("POST /api/folders/remove", s.apiRemoveFolder)
 	mux.HandleFunc("GET /api/dirs", s.apiDirs)
@@ -46,7 +47,8 @@ type accountView struct {
 	Name    string                `json:"name"`
 	Server  string                `json:"server"`
 	HasKey  bool                  `json:"hasKey"`
-	InUse   bool                  `json:"inUse"` // a folder uploads to it
+	Headers []string              `json:"headers"` // custom header names; values never leave the app
+	InUse   bool                  `json:"inUse"`   // a folder uploads to it
 	Status  *engine.AccountStatus `json:"status,omitempty"`
 	Folders int                   `json:"folders"`
 }
@@ -79,7 +81,10 @@ func (s *Server) apiState(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Home, _ = os.UserHomeDir()
 	for _, a := range cfg.Accounts {
-		av := accountView{Name: a.Name, Server: a.Server, HasKey: accounts.HasKey(s.d.CfgPath, a)}
+		av := accountView{Name: a.Name, Server: a.Server, HasKey: accounts.HasKey(s.d.CfgPath, a), Headers: []string{}}
+		if hs, err := accounts.LoadHeaders(s.d.CfgPath, a); err == nil {
+			av.Headers = immich.HeaderNames(hs)
+		}
 		for _, f := range cfg.Folders {
 			if f.Account == a.Name {
 				av.Folders++
@@ -136,15 +141,22 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiProbe(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Server string `json:"server"`
+		Server  string          `json:"server"`
+		Account string          `json:"account"` // "Log in again": reuse its stored header values
+		Headers []immich.Header `json:"headers"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		fail(w, 400, err)
 		return
 	}
+	hs, err := accounts.ResolveHeaders(s.d.CfgPath, in.Account, in.Server, in.Headers)
+	if err != nil {
+		fail(w, 400, err)
+		return
+	}
 	ctx, cancel := bg()
 	defer cancel()
-	info, err := accounts.Probe(ctx, in.Server)
+	info, err := accounts.Probe(ctx, in.Server, hs)
 	if err != nil {
 		fail(w, 400, err)
 		return
@@ -158,19 +170,29 @@ type loginReq struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	APIKey   string `json:"apiKey"`
+	// Custom headers as entered; see accounts.ResolveHeaders. hs is the
+	// resolved set used for the login and saved with the account.
+	Headers []immich.Header `json:"headers"`
+	hs      []immich.Header
 }
 
-func (in *loginReq) validate() error {
+func (s *Server) validateLogin(in *loginReq) error {
 	if err := accounts.ValidName(in.Name); err != nil {
 		return err
 	}
 	srv, err := accounts.NormalizeServer(in.Server)
+	if err != nil {
+		return err
+	}
 	in.Server = srv
+	in.hs, err = accounts.ResolveHeaders(s.d.CfgPath, in.Name, in.Server, in.Headers)
 	return err
 }
 
+func (in *loginReq) client() *immich.Client { return accounts.Client(in.Server, in.hs) }
+
 func (s *Server) finishLogin(w http.ResponseWriter, ctx context.Context, in loginReq, secret string) {
-	u, err := accounts.Save(ctx, s.d.CfgPath, in.Name, in.Server, secret)
+	u, err := accounts.Save(ctx, s.d.CfgPath, in.Name, in.Server, secret, in.hs)
 	if err != nil {
 		fail(w, 400, err)
 		return
@@ -185,13 +207,13 @@ func (s *Server) apiLoginPassword(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	if err := in.validate(); err != nil {
+	if err := s.validateLogin(&in); err != nil {
 		fail(w, 400, err)
 		return
 	}
 	ctx, cancel := bg()
 	defer cancel()
-	sess, err := auth.PasswordLogin(ctx, immich.New(in.Server), strings.TrimSpace(in.Email), in.Password)
+	sess, err := auth.PasswordLogin(ctx, in.client(), strings.TrimSpace(in.Email), in.Password)
 	if err != nil {
 		var apiErr *immich.APIError
 		if errors.As(err, &apiErr) && (apiErr.Status == 400 || apiErr.Status == 401) {
@@ -200,7 +222,7 @@ func (s *Server) apiLoginPassword(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	secret, warn, err := accounts.KeyFromSession(ctx, in.Server, sess)
+	secret, warn, err := accounts.KeyFromSession(ctx, in.client(), sess)
 	if err != nil {
 		fail(w, 400, err)
 		return
@@ -217,7 +239,7 @@ func (s *Server) apiLoginAPIKey(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	if err := in.validate(); err != nil {
+	if err := s.validateLogin(&in); err != nil {
 		fail(w, 400, err)
 		return
 	}
@@ -255,7 +277,7 @@ func (s *Server) apiLoginOIDC(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	if err := in.validate(); err != nil {
+	if err := s.validateLogin(&in); err != nil {
 		fail(w, 400, err)
 		return
 	}
@@ -289,7 +311,7 @@ func (s *Server) apiLoginOIDC(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(done)
 		defer cancel()
-		c := immich.New(in.Server)
+		c := in.client()
 		sess, err := auth.OIDCLogin(ctx, c, auth.OIDCOptions{
 			OpenBrowser: func(string) error { return nil }, // the page navigates itself
 			OnURL:       func(u string) { urlCh <- u },
@@ -300,13 +322,13 @@ func (s *Server) apiLoginOIDC(w http.ResponseWriter, r *http.Request) {
 			s.login.set(map[string]string{"state": "error", "error": oidcHint(err)}, false)
 			return
 		}
-		secret, warn, err := accounts.KeyFromSession(ctx, in.Server, sess)
+		secret, warn, err := accounts.KeyFromSession(ctx, in.client(), sess)
 		if err == nil {
 			if warn != nil {
 				s.log.Warn("login", "warning", warn)
 			}
 			var u immich.User
-			u, err = accounts.Save(ctx, s.d.CfgPath, in.Name, in.Server, secret)
+			u, err = accounts.Save(ctx, s.d.CfgPath, in.Name, in.Server, secret, in.hs)
 			if err == nil {
 				s.reload()
 				s.login.set(map[string]string{"state": "done", "account": in.Name, "name": u.Name, "email": u.Email}, false)
@@ -359,6 +381,29 @@ func (s *Server) apiRemoveAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.reload()
 	writeJSON(w, 200, struct{}{})
+}
+
+// apiSetHeaders replaces an account's custom headers. A header sent with an
+// empty value keeps its stored value; one left out is removed. Only the
+// names come back.
+func (s *Server) apiSetHeaders(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name    string          `json:"name"`
+		Headers []immich.Header `json:"headers"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	ctx, cancel := bg()
+	defer cancel()
+	hs, err := accounts.SetHeaders(ctx, s.d.CfgPath, in.Name, in.Headers)
+	if err != nil {
+		fail(w, 400, err)
+		return
+	}
+	s.reload()
+	writeJSON(w, 200, map[string][]string{"headers": immich.HeaderNames(hs)})
 }
 
 // --- folders ---

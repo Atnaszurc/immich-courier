@@ -206,12 +206,17 @@ function renderAccounts() {
           h("span", { class: "state " + cls }, text)),
         h("div", { class: "card-server" }, host(a.server)),
         s && s.lastError && !s.online ? h("div", { class: "stats", title: s.lastError }, "Last error: " + s.lastError) : null,
+        a.headers.length ? h("div", { class: "stats" }, "Custom headers: " + a.headers.join(", ")) : null,
         h("div", { class: "stats" }, stats.join(" · ")),
         h("div", { class: "card-actions" },
           h("button", {
             class: needLogin ? "btn primary small" : "btn ghost small", type: "button",
             onclick: () => openAccountDialog(a),
           }, needLogin ? "Log in again" : "Change login"),
+          a.hasKey ? h("button", {
+            class: "btn ghost small", type: "button",
+            onclick: () => openHeadersDialog(a),
+          }, "Custom headers") : null,
           h("button", {
             class: "btn ghost small danger", type: "button",
             onclick: () => removeAccount(a),
@@ -318,6 +323,61 @@ $("btn-rescan").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 
+// ---- custom headers -------------------------------------------------------
+// Rows of name + value. Saved values never come back from the app: a row for
+// an existing header shows its name with an empty value, which means "keep".
+
+function headerRow(box, name, existing) {
+  const row = h("div", { class: "hdr-row" },
+    h("input", { type: "text", class: "hdr-name", placeholder: "Header name", "aria-label": "Header name", autocomplete: "off", spellcheck: "false", maxlength: "64", value: name || null }),
+    h("input", { type: "password", class: "hdr-value", placeholder: existing ? "unchanged" : "Value", "aria-label": "Header value", autocomplete: "off" }),
+    h("button", { class: "btn ghost small", type: "button", title: "Remove header", "aria-label": "Remove header", onclick: () => row.remove() }, "×"));
+  box.append(row);
+  return row;
+}
+
+function setHeaderRows(box, names) {
+  box.replaceChildren();
+  for (const n of names || []) headerRow(box, n, true);
+}
+
+function headerRows(box) {
+  return [...box.querySelectorAll(".hdr-row")]
+    .map((r) => ({ name: r.querySelector(".hdr-name").value.trim(), value: r.querySelector(".hdr-value").value }))
+    .filter((x) => x.name || x.value);
+}
+
+$("hdr-add").addEventListener("click", () => headerRow($("hdr-rows")).querySelector("input").focus());
+$("hdrs-add").addEventListener("click", () => headerRow($("hdrs-rows")).querySelector("input").focus());
+
+let headersFor = null; // account in the headers dialog
+
+function openHeadersDialog(a) {
+  headersFor = a;
+  $("hdrs-title").textContent = `Custom headers: ${a.name}`;
+  $("hdrs-server").textContent = host(a.server);
+  $("hdrs-warn").hidden = !a.server.startsWith("http://");
+  setHeaderRows($("hdrs-rows"), a.headers);
+  if (!a.headers.length) headerRow($("hdrs-rows"));
+  showError($("hdrs-error"), null);
+  $("dlg-headers").showModal();
+}
+
+$("btn-hdrs-save").addEventListener("click", async (e) => {
+  showError($("hdrs-error"), null);
+  busy(e.target, true, "Checking…");
+  try {
+    const r = await api("POST", "/api/accounts/headers", { name: headersFor.name, headers: headerRows($("hdrs-rows")) });
+    $("dlg-headers").close();
+    toast(r.headers.length ? `Saved: ${r.headers.join(", ")}` : "Custom headers removed");
+    refresh();
+  } catch (err) {
+    showError($("hdrs-error"), err);
+  } finally {
+    busy(e.target, false);
+  }
+});
+
 // ---- account dialog -----------------------------------------------------
 
 let probed = null; // ServerInfo for the current dialog
@@ -330,6 +390,8 @@ function openAccountDialog(existing) {
   $("in-server").disabled = false;
   $("in-name").value = existing ? existing.name : (state && state.accounts.length ? "" : "personal");
   $("in-name").readOnly = !!existing;
+  setHeaderRows($("hdr-rows"), existing ? existing.headers : []);
+  $("hdr-box").open = !!(existing && existing.headers.length);
   $("step-server").hidden = false;
   $("step-login").hidden = true;
   $("btn-continue").hidden = false;
@@ -344,7 +406,11 @@ async function probeServer() {
   showError($("acct-error"), null);
   busy(btn, true, "Checking…");
   try {
-    probed = await api("POST", "/api/probe", { server: $("in-server").value });
+    probed = await api("POST", "/api/probe", {
+      server: $("in-server").value,
+      account: $("in-name").readOnly ? $("in-name").value : "",
+      headers: headerRows($("hdr-rows")),
+    });
     $("in-server").value = probed.server;
     $("server-info").textContent = `Immich ${probed.version || ""} at ${host(probed.server)}`;
     $("method-oidc").hidden = !probed.oauth;
@@ -377,7 +443,7 @@ function loginBody(extra) {
   if (!$("in-name").readOnly && state && state.accounts.some((a) => a.name.toLowerCase() === name.toLowerCase())) {
     throw new Error(`There is already an account named "${name}". Choose another name, or use Log in again on that account.`);
   }
-  return Object.assign({ name, server: probed.server }, extra);
+  return Object.assign({ name, server: probed.server, headers: headerRows($("hdr-rows")) }, extra);
 }
 
 async function loggedIn(res) {

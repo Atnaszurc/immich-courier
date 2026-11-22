@@ -150,6 +150,11 @@ details.method .btn { margin-top: 10px; }
 .server-info { margin: 0 0 4px; color: var(--muted); font-size: 13.5px; overflow-wrap: anywhere; }
 .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .error { color: var(--danger); font-size: 13.5px; margin: 12px 0 0; overflow-wrap: anywhere; }
+.hdr-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.hdr-row { display: flex; gap: 6px; align-items: center; }
+.hdr-row input { flex: 1; min-width: 0; }
+.hdr-row .btn { flex: none; }
+details.method .hdr-add { margin-top: 8px; }
 
 .picker { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .picker-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px; background: var(--surface-2); }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"immich-courier/internal/config"
+	"immich-courier/internal/immich"
 	"immich-courier/internal/state"
 )
 
@@ -154,6 +155,11 @@ func start(t *testing.T, fake *fakeImmich, srvURL, dir, dbPath string) *harness 
 // startWith runs an engine with one account "a" watching all dirs.
 func startWith(t *testing.T, fake *fakeImmich, srvURL, dbPath string, dirs ...string) *harness {
 	t.Helper()
+	return startCreds(t, fake, srvURL, dbPath, Credentials{APIKey: "k"}, dirs...)
+}
+
+func startCreds(t *testing.T, fake *fakeImmich, srvURL, dbPath string, cr Credentials, dirs ...string) *harness {
+	t.Helper()
 	cfg := &config.Config{Accounts: []config.Account{{Name: "a", Server: srvURL}}}
 	for _, d := range dirs {
 		cfg.Folders = append(cfg.Folders, config.Folder{Path: d, Account: "a"})
@@ -167,7 +173,7 @@ func startWith(t *testing.T, fake *fakeImmich, srvURL, dbPath string, dirs ...st
 	if testing.Verbose() {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	e, err := New(cfg, map[string]string{"a": "k"}, store, log, fastOptions())
+	e, err := New(cfg, map[string]Credentials{"a": cr}, store, log, fastOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,5 +318,30 @@ func TestRestartSkipsDoneAndUploadsQueued(t *testing.T) {
 	waitFor(t, "b.jpg and c.jpg uploaded after restart", func() bool { return fake.has("b.jpg") && fake.has("c.jpg") })
 	if n := fake.uploads.Load(); n != 3 {
 		t.Fatalf("uploads = %d, want 3 (a.jpg must not be re-uploaded)", n)
+	}
+}
+
+// An account behind a proxy that wants its own header uploads with it.
+func TestUploadWithCustomHeaders(t *testing.T) {
+	fake := &fakeImmich{assets: map[string]string{}}
+	inner := fake.handler()
+	var refused atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Gate") != "open-sesame" {
+			refused.Add(1)
+			http.Error(w, "forbidden", 403)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cr := Credentials{APIKey: "k", Headers: []immich.Header{{Name: "X-Gate", Value: "open-sesame"}}}
+	h := startCreds(t, fake, srv.URL, filepath.Join(t.TempDir(), "state.db"), cr, dir)
+	defer h.stop()
+	os.WriteFile(filepath.Join(dir, "a.jpg"), []byte("photo-a"), 0o644)
+	waitFor(t, "a.jpg uploaded", func() bool { return fake.has("a.jpg") })
+	if n := refused.Load(); n != 0 {
+		t.Fatalf("%d requests went without the custom header", n)
 	}
 }

@@ -89,11 +89,7 @@ func (c *Client) Upload(ctx context.Context, f io.Reader, filename, sha1hex stri
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-immich-checksum", sha1hex)
-	if c.APIKey != "" {
-		req.Header.Set("x-api-key", c.APIKey)
-	} else if c.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-	}
+	c.authorize(req)
 
 	// Uploads can take a long time; rely on ctx instead of the client timeout.
 	hc := *c.HTTP

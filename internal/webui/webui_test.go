@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"immich-courier/internal/accounts"
+	"immich-courier/internal/config"
 	"immich-courier/internal/daemon"
 )
 
@@ -329,5 +331,81 @@ func TestTimingSettings(t *testing.T) {
 	}
 	if s := settings(); s["settleSeconds"] != float64(30) {
 		t.Fatalf("a rejected save changed the settings: %v", s)
+	}
+}
+
+// A server behind a proxy with basic auth: the headers entered on the page
+// are used for probe and login, saved, and only their names come back.
+func TestCustomHeadersFlow(t *testing.T) {
+	const proxyAuth = "Basic cHJveHk6c2VjcmV0"
+	im := fakeImmich()
+	defer im.Close()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != proxyAuth {
+			http.Error(w, "401 Authorization Required", 401)
+			return
+		}
+		r.Header.Del("Authorization")
+		u, _ := url.Parse(im.URL)
+		httputil.NewSingleHostReverseProxy(u).ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	s, c, loginURL := setup(t)
+	c.login(loginURL)
+	hdrs := []map[string]string{{"name": "Authorization", "value": proxyAuth}}
+
+	resp, out := c.do("POST", "/api/probe", map[string]any{"server": proxy.URL}, true)
+	if resp.StatusCode != 400 || !strings.Contains(out["error"].(string), "custom headers") {
+		t.Fatalf("probe without headers: %d %v", resp.StatusCode, out)
+	}
+	if resp, out = c.do("POST", "/api/probe", map[string]any{"server": proxy.URL, "headers": hdrs}, true); resp.StatusCode != 200 {
+		t.Fatalf("probe with headers: %d %v", resp.StatusCode, out)
+	}
+	// Reserved and malformed headers are refused.
+	for _, bad := range []map[string]string{{"name": "x-api-key", "value": "k"}, {"name": "X-A", "value": "a\r\nb"}} {
+		resp, _ = c.do("POST", "/api/probe", map[string]any{"server": proxy.URL, "headers": []map[string]string{bad}}, true)
+		if resp.StatusCode != 400 {
+			t.Fatalf("header %v accepted", bad)
+		}
+	}
+	resp, out = c.do("POST", "/api/login/apikey", map[string]any{"name": "pri", "server": proxy.URL, "apiKey": "good-key", "headers": hdrs}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("login: %d %v", resp.StatusCode, out)
+	}
+
+	// State lists the header name, never the value.
+	req, _ := http.NewRequest("GET", c.base+"/api/state", nil)
+	req.Header.Set(sessionHeader, c.session)
+	sr, err := c.hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(sr.Body)
+	sr.Body.Close()
+	if strings.Contains(string(body), "cHJveHk") || !strings.Contains(string(body), `"headers":["Authorization"]`) {
+		t.Fatalf("state: %s", body)
+	}
+
+	// "Log in again" sends the names with empty values: stored values are used.
+	keep := []map[string]string{{"name": "Authorization", "value": ""}}
+	if resp, out = c.do("POST", "/api/probe", map[string]any{"server": proxy.URL, "account": "pri", "headers": keep}, true); resp.StatusCode != 200 {
+		t.Fatalf("re-login probe: %d %v", resp.StatusCode, out)
+	}
+	if resp, out = c.do("POST", "/api/login/apikey", map[string]any{"name": "pri", "server": proxy.URL, "apiKey": "good-key", "headers": keep}, true); resp.StatusCode != 200 {
+		t.Fatalf("re-login: %d %v", resp.StatusCode, out)
+	}
+
+	// Changing them is checked against the server first.
+	resp, _ = c.do("POST", "/api/accounts/headers", map[string]any{"name": "pri", "headers": []map[string]string{{"name": "Authorization", "value": "Basic d3Jvbmc="}}}, true)
+	if resp.StatusCode != 400 {
+		t.Fatal("headers the proxy refuses were saved")
+	}
+	a := config.Account{Name: "pri", Server: proxy.URL}
+	if hs, _ := accounts.LoadHeaders(s.d.CfgPath, a); len(hs) != 1 || hs[0].Value != proxyAuth {
+		t.Fatalf("stored headers after refused change: %v", hs)
+	}
+	// Removing them: the proxy now refuses the key, so that's refused too.
+	if resp, _ = c.do("POST", "/api/accounts/headers", map[string]any{"name": "pri", "headers": []any{}}, true); resp.StatusCode != 400 {
+		t.Fatal("removed headers the server needs")
 	}
 }

@@ -228,6 +228,46 @@ vendoring Immich's generated SDK or copying server code.
 - Release builds: CI for Windows/Linux (pure Go) + macOS runner (CGO), signing/notarization.
 - Per-folder options (album, post-upload action) in the settings page.
 
+### Custom headers (2026-11-22)
+
+Requested by a user whose Immich API sits behind basic auth at the reverse proxy (the Android
+app has "custom headers"; most other clients don't). Per account, because the key and server
+are per account.
+
+- **Storage:** one keychain entry per account, `<KeyName>/headers` ("/" can't occur in an
+  account name), holding the whole set as JSON. Nothing in config.toml. Written after the API
+  key in `accounts.Save` and undone with it if the config can't be saved; removed by
+  `DeleteKey` (logout, remove account).
+- **Write-only values:** `/api/state` and `list` return names only. Forms send names with an
+  empty value to mean "keep the stored value" (`accounts.ResolveHeaders`); stored values are
+  only reused for the same account name on the same server. A `nil` set (CLI `login` without
+  `--header`) keeps the stored headers; an empty set removes them.
+- **CLI:** `--header NAME` (repeatable) on `login` and `headers`; values are prompted with
+  hidden input, never taken from argv (shell history, process list). `headers --clear` removes
+  them.
+- **Validation** (`immich.ValidateHeaders`): RFC 7230 token names, printable-ASCII values (no
+  CR/LF/NUL), no duplicates, at most 10 headers / 2000 bytes (Windows Credential Manager caps an
+  entry at 2560 bytes). Reserved, because the app or net/http owns them: `Host`,
+  `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`, `Accept`,
+  `Accept-Encoding` (would turn off transparent gzip), hop-by-hop headers, `x-api-key`,
+  `x-immich-user-token`, `x-immich-session-token`, `x-immich-share-key`, `x-immich-checksum`.
+  `Cookie` is allowed (some access gateways use one).
+- **Sending:** custom headers are set first, then the app's own (`immich.Client.authorize`),
+  on every request including `/server/ping`, since the proxy gates that too. Ping still
+  sends no Immich credentials. The existing same-origin redirect check covers them.
+- **Session tokens** (password/OAuth login, only while minting the API key) normally go as
+  `Authorization: Bearer`. If a custom header uses `Authorization`, the token goes in Immich's
+  `x-immich-user-token` header instead (Immich checks that one first).
+- **Changing headers on an existing account** (`/api/accounts/headers`, CLI `headers`)
+  re-checks `/users/me` with the stored key and the new set, as the same Immich user, before
+  saving; a set the proxy refuses is not saved.
+- **Probe hint:** a 401/403/407 on ping can't come from Immich (ping is unauthenticated), so
+  the error suggests adding custom headers.
+- **OAuth:** only the app's API calls carry the headers. The browser part of SSO goes to the
+  identity provider and the loopback callback, not through the Immich proxy; if Immich's own
+  web login is behind the proxy, the browser handles that itself.
+- **http://:** allowed (LAN setups), with a warning in the CLI and the headers dialog.
+
 ### Security audit fixes (2026-11-20)
 
 From the November 2026 audit (how it was run and the results: [SECURITY.md](SECURITY.md)). Each fix

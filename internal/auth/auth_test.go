@@ -109,7 +109,7 @@ func TestOIDCLoginAndMintKey(t *testing.T) {
 		t.Fatalf("unexpected session %+v", s)
 	}
 
-	key, err := MintAPIKey(ctx, srv.URL, s, "test")
+	key, err := MintAPIKey(ctx, c, s, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

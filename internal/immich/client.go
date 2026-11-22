@@ -16,11 +16,13 @@ import (
 )
 
 // Client talks to one Immich server. Exactly one of APIKey or AccessToken is
-// normally set; with neither, only unauthenticated endpoints work.
+// normally set; with neither, only unauthenticated endpoints work. Headers
+// (validated with ValidateHeaders) go with every request, ping included.
 type Client struct {
 	BaseURL     string // e.g. https://photos.example.com (no trailing /api)
 	APIKey      string
 	AccessToken string
+	Headers     []Header
 	HTTP        *http.Client
 }
 
@@ -32,7 +34,7 @@ func New(baseURL string) *Client {
 }
 
 // sameOrigin refuses redirects that leave the server's scheme and host. The
-// API key is a custom header, which net/http forwards on every redirect, so
+// API key and any custom headers are forwarded by net/http on every redirect, so
 // a redirect to another host (an SSO gateway, a misconfigured proxy) or to
 // plain http would hand the key over.
 func sameOrigin(req *http.Request, via []*http.Request) error {
@@ -73,12 +75,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	switch {
-	case c.APIKey != "":
-		req.Header.Set("x-api-key", c.APIKey)
-	case c.AccessToken != "":
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-	}
+	c.authorize(req)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -111,7 +108,9 @@ func (c *Client) Ping(ctx context.Context) error {
 	var r struct {
 		Res string `json:"res"`
 	}
-	anon := *c // ping needs no credentials; don't send them
+	// Ping needs no Immich credentials; don't send them. Custom headers
+	// stay: a proxy in front of Immich may refuse anything without them.
+	anon := *c
 	anon.APIKey, anon.AccessToken = "", ""
 	if err := anon.do(ctx, http.MethodGet, "/server/ping", nil, &r); err != nil {
 		return err

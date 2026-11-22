@@ -75,10 +75,19 @@ browser but are served by the app itself on your computer (127.0.0.1 only).
 as a redirect address for Immich's OAuth client in the login provider. Email and
 password or an API key work without that.
 
+**Server behind a proxy with its own login:** if a reverse proxy in front of Immich
+asks for its own credentials (for example basic auth on the API), open **Custom
+headers** when adding the account and enter what the proxy expects, such as
+`Authorization` with `Basic <base64 of user:password>`. They are sent with every
+request to that server and stored in the keychain next to the upload key, never in
+the config file; the settings page only ever shows their names again. Use an
+`https://` address, or they travel unencrypted. Single sign-on still opens in your
+browser, which has to get past the proxy on its own.
+
 ### Command line and servers
 
 The same program is a command-line tool when given arguments: `login`,
-`add-folder`, `status`, `pause`, `resume`, `rescan`, `stop`, `list`, `run`
+`headers`, `add-folder`, `status`, `pause`, `resume`, `rescan`, `stop`, `list`, `run`
 (headless, for servers) and `settings --print` (URL for an SSH tunnel). Run
 `immich-courier help` for details. On Windows the command line is mainly meant
 for Windows 11 24H2 and later and may behave differently on older versions. On

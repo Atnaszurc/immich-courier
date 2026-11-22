@@ -15,6 +15,12 @@ a personal project and there is no guaranteed response time.
 - **Your Immich API key.** It lives in the OS keychain (Windows Credential Manager, macOS
   Keychain, Secret Service on Linux), never in the config file. It is only sent to the server
   it was created for, and redirects to another host are refused.
+- **Custom headers** (for a reverse proxy with its own login) get the same treatment as the
+  API key: stored in the OS keychain, only sent to that account's server, never followed
+  through a redirect to another host, never written to the log. The settings page and CLI
+  only show their names; values are write-only, and the CLI prompts for them instead of
+  taking them as arguments. They can't replace the headers the app sets itself
+  (`x-api-key`, `Host`, `Content-Length` and so on), and line breaks are refused.
 - **Your files.** Only photos and videos in folders you chose are uploaded, only to the
   account you bound the folder to. Nothing outside a watched folder is read.
 - **The settings page.** It is served on `127.0.0.1` only while open. The tray opens it with a

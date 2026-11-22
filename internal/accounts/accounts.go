@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -63,14 +64,32 @@ func ValidName(name string) error {
 	return nil
 }
 
-// Probe checks that the server is an Immich server and reports how users can log in.
-func Probe(ctx context.Context, server string) (ServerInfo, error) {
+// Client returns a client for server that sends the given custom headers
+// (already resolved and validated, see ResolveHeaders).
+func Client(server string, headers []immich.Header) *immich.Client {
+	c := immich.New(server)
+	c.Headers = headers
+	return c
+}
+
+// Probe checks that the server is an Immich server and reports how users
+// can log in. headers are the custom headers a proxy in front of it needs.
+func Probe(ctx context.Context, server string, headers []immich.Header) (ServerInfo, error) {
 	server, err := NormalizeServer(server)
 	if err != nil {
 		return ServerInfo{}, err
 	}
-	c := immich.New(server)
+	c := Client(server, headers)
 	if err := c.Ping(ctx); err != nil {
+		var apiErr *immich.APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403 || apiErr.Status == 407) {
+			// Immich answers ping without credentials, so this came from
+			// something in front of it.
+			if len(headers) > 0 {
+				return ServerInfo{}, fmt.Errorf("%s refused the request (HTTP %d) before it reached Immich; check the custom headers", server, apiErr.Status)
+			}
+			return ServerInfo{}, fmt.Errorf("%s asks for a login (HTTP %d) before it reaches Immich. If it is behind a reverse proxy with its own login (for example basic auth), add the headers it needs as custom headers", server, apiErr.Status)
+		}
 		return ServerInfo{}, fmt.Errorf("can't reach an Immich server at %s: %w", server, err)
 	}
 	info := ServerInfo{Server: server}
@@ -87,9 +106,9 @@ func Probe(ctx context.Context, server string) (ServerInfo, error) {
 
 // KeyFromSession creates the app's API key from a temporary login session
 // and logs that session out. warn is set if only the logout failed.
-func KeyFromSession(ctx context.Context, server string, s auth.Session) (secret string, warn, err error) {
+func KeyFromSession(ctx context.Context, c *immich.Client, s auth.Session) (secret string, warn, err error) {
 	host, _ := os.Hostname()
-	key, err := auth.MintAPIKey(ctx, server, s, "immich-courier ("+host+")")
+	key, err := auth.MintAPIKey(ctx, c, s, "immich-courier ("+host+")")
 	if err != nil && key.Secret == "" {
 		return "", nil, err
 	}
@@ -128,12 +147,146 @@ func LoadKey(cfgPath string, a config.Account) (string, error) {
 	return k, err
 }
 
+// headersName is the keychain entry holding an account's custom headers.
+// "/" can't occur in an account name, so it never collides with a key.
+func headersName(cfgPath, name, server string) string {
+	return KeyName(cfgPath, name, server) + "/headers"
+}
+
+// LoadHeaders returns an account's custom headers (nil if it has none).
+func LoadHeaders(cfgPath string, a config.Account) ([]immich.Header, error) {
+	v, err := keyring.Get(KeyringService, headersName(cfgPath, a.Name, a.Server))
+	if errors.Is(err, keyring.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("couldn't read the custom headers from the OS keychain: %w", err)
+	}
+	var hs []immich.Header
+	if err := json.Unmarshal([]byte(v), &hs); err != nil || immich.ValidateHeaders(hs) != nil {
+		return nil, errors.New("the custom headers stored in the OS keychain are damaged; set them again")
+	}
+	return hs, nil
+}
+
+// storeHeaders writes (or, for an empty set, deletes) an account's custom
+// headers and returns a function that puts the previous entry back.
+func storeHeaders(cfgPath, name, server string, hs []immich.Header) (undo func(), err error) {
+	kn := headersName(cfgPath, name, server)
+	prev, prevErr := keyring.Get(KeyringService, kn)
+	undo = func() {
+		if prevErr == nil {
+			_ = keyring.Set(KeyringService, kn, prev)
+		} else {
+			_ = keyring.Delete(KeyringService, kn)
+		}
+	}
+	if len(hs) == 0 {
+		if err := keyring.Delete(KeyringService, kn); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			return nil, fmt.Errorf("couldn't remove the custom headers from the OS keychain: %w", err)
+		}
+		return undo, nil
+	}
+	b, err := json.Marshal(hs)
+	if err != nil {
+		return nil, err
+	}
+	if err := keyring.Set(KeyringService, kn, string(b)); err != nil {
+		return nil, fmt.Errorf("couldn't store the custom headers in the OS keychain: %w", err)
+	}
+	return undo, nil
+}
+
+// ResolveHeaders turns custom headers entered by the user into the set to
+// use for account name on server. nil means "unchanged": the account's
+// stored headers (none for a new account). Otherwise in replaces them, and
+// an entry with an empty value keeps that header's stored value, so a form
+// can show the names without ever sending the secrets back to the page.
+// Stored values are only reused for the same account on the same server.
+func ResolveHeaders(cfgPath, name, server string, in []immich.Header) ([]immich.Header, error) {
+	server, err := NormalizeServer(server)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	var stored []immich.Header
+	var loadErr error
+	if a, ok := cfg.Account(name); ok && a.Server == server {
+		stored, loadErr = LoadHeaders(cfgPath, a)
+	}
+	if in == nil {
+		return stored, loadErr
+	}
+	out := make([]immich.Header, 0, len(in))
+	for _, h := range in {
+		if strings.TrimSpace(h.Name) == "" && strings.TrimSpace(h.Value) == "" {
+			continue // an empty row in a form
+		}
+		if strings.TrimSpace(h.Value) == "" {
+			for _, s := range stored {
+				if strings.EqualFold(s.Name, strings.TrimSpace(h.Name)) {
+					h.Value = s.Value
+				}
+			}
+		}
+		out = append(out, h)
+	}
+	if err := immich.ValidateHeaders(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SetHeaders replaces an existing account's custom headers (see
+// ResolveHeaders for in; nil removes them all). The stored API key must
+// still work with the new headers, as the same Immich user, before
+// anything is saved.
+func SetHeaders(ctx context.Context, cfgPath, name string, in []immich.Header) ([]immich.Header, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	a, ok := cfg.Account(name)
+	if !ok {
+		return nil, fmt.Errorf("no account named %q", name)
+	}
+	if in == nil {
+		in = []immich.Header{}
+	}
+	hs, err := ResolveHeaders(cfgPath, name, a.Server, in)
+	if err != nil {
+		return nil, err
+	}
+	key, err := LoadKey(cfgPath, a)
+	if err != nil {
+		return nil, fmt.Errorf("account %q isn't logged in; log in again and enter the headers there", name)
+	}
+	c := Client(a.Server, hs)
+	c.APIKey = key
+	u, err := c.Me(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("the server didn't accept the account's key with these headers, so nothing was changed: %w", err)
+	}
+	if a.UserID != "" && u.ID != a.UserID {
+		return nil, errors.New("with these headers the key belongs to another Immich user, so nothing was changed")
+	}
+	if _, err := storeHeaders(cfgPath, name, a.Server, hs); err != nil {
+		return nil, err
+	}
+	return hs, nil
+}
+
 // Save verifies the API key, stores it in the keychain and adds the
 // account to the config, or re-authenticates an existing one. An existing
 // account keeps its server and Immich user: logging in to another server
 // or as another user under the same name is refused, so its folders never
-// silently start uploading somewhere else. It returns the key's user.
-func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.User, error) {
+// silently start uploading somewhere else. headers is the account's full
+// set of custom headers from ResolveHeaders (empty removes them). It
+// returns the key's user.
+func Save(ctx context.Context, cfgPath, name, server, secret string, headers []immich.Header) (immich.User, error) {
 	if err := ValidName(name); err != nil {
 		return immich.User{}, err
 	}
@@ -156,7 +309,10 @@ func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.Use
 	if exists && old.Server != server {
 		return immich.User{}, fmt.Errorf("account %q uploads to %s. To upload to %s, add it as a new account with another name", name, old.Server, server)
 	}
-	c := immich.New(server)
+	if err := immich.ValidateHeaders(headers); err != nil {
+		return immich.User{}, err
+	}
+	c := Client(server, headers)
 	c.APIKey = secret
 	u, err := c.Me(ctx)
 	if err != nil {
@@ -176,13 +332,22 @@ func Save(ctx context.Context, cfgPath, name, server, secret string) (immich.Use
 	if err := keyring.Set(KeyringService, kn, secret); err != nil {
 		return immich.User{}, fmt.Errorf("couldn't store the key in the OS keychain: %w", err)
 	}
-	cfg.SetAccount(config.Account{Name: name, Server: server, UserID: u.ID})
-	if err := cfg.Save(cfgPath); err != nil {
+	undoKey := func() {
 		if prevErr == nil {
 			_ = keyring.Set(KeyringService, kn, prev)
 		} else {
 			_ = keyring.Delete(KeyringService, kn)
 		}
+	}
+	undoHeaders, err := storeHeaders(cfgPath, name, server, headers)
+	if err != nil {
+		undoKey()
+		return immich.User{}, err
+	}
+	cfg.SetAccount(config.Account{Name: name, Server: server, UserID: u.ID})
+	if err := cfg.Save(cfgPath); err != nil {
+		undoHeaders()
+		undoKey()
 		return immich.User{}, err
 	}
 	return u, nil
@@ -194,12 +359,14 @@ func HasKey(cfgPath string, a config.Account) bool {
 	return err == nil
 }
 
-// DeleteKey removes an account's key from the keychain (also an early
-// build's entry under the bare name). A missing key is not an error.
+// DeleteKey removes an account's key and custom headers from the keychain
+// (also an early build's key under the bare name). A missing entry is not
+// an error.
 func DeleteKey(cfgPath string, a config.Account) error {
-	err := keyring.Delete(KeyringService, KeyName(cfgPath, a.Name, a.Server))
-	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return err
+	for _, kn := range []string{KeyName(cfgPath, a.Name, a.Server), headersName(cfgPath, a.Name, a.Server)} {
+		if err := keyring.Delete(KeyringService, kn); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			return err
+		}
 	}
 	_ = keyring.Delete(KeyringService, a.Name)
 	return nil

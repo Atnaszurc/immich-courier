@@ -84,6 +84,13 @@
       <label for="in-server">Immich server address</label>
       <input id="in-server" type="url" inputmode="url" autocomplete="url" placeholder="https://photos.example.com" required>
       <p class="hint">The same address you use for Immich in your browser.</p>
+      <details id="hdr-box" class="method">
+        <summary>Custom headers (reverse proxy)</summary>
+        <p class="hint">Only needed if a proxy in front of Immich has its own login, for example basic auth
+          (<code>Authorization</code>: <code>Basic …</code>). They are sent with every request to this server.</p>
+        <div id="hdr-rows" class="hdr-rows"></div>
+        <button id="hdr-add" class="btn ghost small hdr-add" type="button">+ Add header</button>
+      </details>
     </div>
 
     <div id="step-login" hidden>
@@ -122,6 +129,23 @@
     <div class="dlg-actions">
       <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
       <button id="btn-continue" class="btn primary" type="button">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Custom headers of an existing account -->
+<dialog id="dlg-headers">
+  <form method="dialog" class="dlg" id="form-headers" novalidate>
+    <h3 id="hdrs-title">Custom headers</h3>
+    <p class="hint">Sent with every request to <span id="hdrs-server"></span>, for a proxy in front of Immich that has its
+      own login. Values are kept in your system's keychain and never shown again; leave a value empty to keep it.</p>
+    <div id="hdrs-rows" class="hdr-rows"></div>
+    <div><button id="hdrs-add" class="btn ghost small hdr-add" type="button">+ Add header</button></div>
+    <p id="hdrs-warn" class="hint" hidden>This server address is http://, so these headers are sent unencrypted.</p>
+    <p id="hdrs-error" class="error" role="alert" hidden></p>
+    <div class="dlg-actions">
+      <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
+      <button id="btn-hdrs-save" class="btn primary" type="button">Check and save</button>
     </div>
   </form>
 </dialog>

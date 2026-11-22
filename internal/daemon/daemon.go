@@ -214,7 +214,7 @@ func (d *Daemon) buildEngine() (*engine.Engine, error) {
 	if len(cfg.Folders) == 0 {
 		return nil, errors.New("no folders to watch yet")
 	}
-	keys := map[string]string{}
+	keys := map[string]engine.Credentials{}
 	for _, f := range cfg.Folders {
 		if _, ok := keys[f.Account]; ok {
 			continue
@@ -230,7 +230,11 @@ func (d *Daemon) buildEngine() (*engine.Engine, error) {
 		if strings.IndexFunc(k, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
 			return nil, fmt.Errorf("the API key stored for account %q is malformed; log in again", f.Account)
 		}
-		keys[f.Account] = k
+		hs, err := accounts.LoadHeaders(d.CfgPath, a)
+		if err != nil {
+			return nil, fmt.Errorf("account %q: %w", f.Account, err)
+		}
+		keys[f.Account] = engine.Credentials{APIKey: k, Headers: hs}
 	}
 	opt := engine.Options{Settle: cfg.Settings.Settle(), Rescan: cfg.Settings.Rescan()}
 	if d.EngineOptions != nil {
